@@ -7,6 +7,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location("select_tests", ROOT / "scripts" / "select_tests.py")
 assert _spec and _spec.loader
@@ -43,6 +45,7 @@ def test_unknown_file_is_safe_by_default():
     assert select(["algo/nuevo.txt"]) == "ALL"
 
 
+@pytest.mark.skipif(not (ROOT / ".git").exists(), reason="no es un checkout de git (p. ej. la imagen Docker)")
 def test_every_tracked_file_is_classified():
     """Cada fichero del repo cae en una regla explícita (si no, ejecuta todo: válido, pero se avisa)."""
     files = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.split()
