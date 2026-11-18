@@ -188,6 +188,9 @@ class Job:
         self.last_output_at: float | None = None
         self.stalls = 0
         self.timed_out_reason: str | None = None
+        # Procesos del grupo que ignoraron SIGTERM y se mataron con SIGKILL, y los que ni así murieron.
+        self.killed_procs: list[int] = []
+        self.orphans: list[int] = []
         self.dir = directory
         self.redact = redactor
         self._lines: deque[LogLine] = deque(maxlen=memory_lines)
@@ -814,6 +817,14 @@ class JobManager:
         job.exit_code = res.exit_code
         if res.abandoned:
             job.add_line("core", f"el proceso {res.pid} no terminó ni con SIGKILL; se abandona")
+        if res.killed:
+            job.killed_procs += res.killed
+            job.add_line("core", f"{len(res.killed)} proceso(s) del grupo ignoraron SIGTERM y se mataron con "
+                                 f"SIGKILL: pid {', '.join(map(str, res.killed))}")
+        if res.survivors:
+            job.orphans += res.survivors
+            job.add_line("core", f"AVISO: siguen vivos procesos del grupo tras SIGKILL: pid "
+                                 f"{', '.join(map(str, res.survivors))}")
         if res.cancelled:
             return "timed_out" if job.timed_out_reason else "cancelled"
         if res.timed_out:
@@ -986,15 +997,30 @@ class JobManager:
     def _report(self, job: Job, backend: Backend[Any], spec: Any) -> dict[str, Any]:
         ok = job.state == JobState.SUCCEEDED
         dur = job.duration() or 0.0
+        summary: dict[str, Any] = {}
+        try:  # resumen propio del backend (tests de Maven/Gradle, descargas...) a partir del log
+            output = [ln.text for ln in job.tail(20000) if ln.stream != "core"]
+            summary = backend.summarize(spec, output, ok=ok) or {}
+        except Exception as exc:  # un resumen roto no debe impedir el informe
+            job.add_line("core", f"aviso: el resumen del backend falló: {exc!r}")
+        if job.state == JobState.FAILED and summary.get("error_detail"):
+            job.error = f"{job.error}: {summary['error_detail']}"
         if ok:
-            pkgs = ", ".join(f"{k} {v}" for k, v in job.installed.items()) or "sin versiones detectadas"
-            headline = f"[{job.id}] OK en {dur:.1f}s – {job.summary} ({pkgs})"
+            pkgs = ", ".join(f"{k} {v}" for k, v in job.installed.items())
+            detail = f" ({pkgs})" if pkgs else ""
+            headline = f"[{job.id}] OK en {dur:.1f}s – {job.summary}{detail}"
         elif job.state == JobState.CANCELLED:
             headline = f"[{job.id}] cancelado tras {dur:.1f}s – {job.summary}"
         elif job.state == JobState.TIMED_OUT:
             headline = f"[{job.id}] TIEMPO AGOTADO tras {dur:.1f}s – {job.error}"
         else:
             headline = f"[{job.id}] FALLÓ (código {job.exit_code}) tras {dur:.1f}s – {job.error}"
+        if summary.get("headline"):
+            headline += f" · {summary['headline']}"
+        if job.killed_procs:
+            headline += f" · {len(job.killed_procs)} hijo(s) ignoraron SIGTERM y se mataron con SIGKILL"
+        if job.orphans:
+            headline += f" · ATENCIÓN: quedan vivos pid {', '.join(map(str, job.orphans))}"
         recent = job.tail(400)
         report: dict[str, Any] = {
             "job_id": job.id,
@@ -1017,6 +1043,13 @@ class JobManager:
         }
         with contextlib.suppress(Exception):
             report["info"] = backend.result_info(spec)
+        report.update(summary.get("report") or {})
+        if summary.get("hint"):
+            report["hint"] = summary["hint"]
+        if job.killed_procs:
+            report["killed_after_sigterm"] = job.killed_procs
+        if job.orphans:
+            report["orphans"] = job.orphans
         if ok:
             report["log_tail"] = [ln.format() for ln in recent[-5:]]
         else:

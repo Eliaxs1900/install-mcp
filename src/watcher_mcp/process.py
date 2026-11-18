@@ -25,7 +25,7 @@ import shutil
 import signal
 import sys
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 MAX_LINE = 8192
 TERM_GRACE_S = 5.0
@@ -40,6 +40,11 @@ class ProcResult:
     timed_out: bool = False
     pid: int | None = None
     abandoned: bool = False  # ni SIGKILL lo terminó a tiempo
+    # Procesos del grupo que siguieron vivos tras SIGTERM y hubo que matar con SIGKILL
+    # (p. ej. un JVM de surefire suspendido por JDWP, que ignora SIGTERM).
+    killed: list[int] = field(default_factory=list)
+    # Procesos del grupo que ni siquiera SIGKILL eliminó (estado D, otro usuario...).
+    survivors: list[int] = field(default_factory=list)
 
 
 def build_env(extra: Mapping[str, str], remove: tuple[str, ...] = ()) -> dict[str, str]:
@@ -170,7 +175,10 @@ async def run_command(
         asyncio.create_task(_pump(out_reader, "stdout", on_line)),
         asyncio.create_task(_pump(proc.stderr, "stderr", on_line)),
     ]
-    waiter = asyncio.create_task(proc.wait())
+    # No se usa proc.wait(): desde Python 3.12 no vuelve hasta que se cierran también las
+    # tuberías, así que un hijo que siga vivo con nuestra stdout abierta lo dejaría colgado
+    # aunque el proceso principal ya haya terminado.
+    waiter = asyncio.create_task(_exited(proc))
     canceller = asyncio.create_task(cancel_event.wait())
     result = ProcResult(exit_code=None, pid=proc.pid)
     try:
@@ -189,7 +197,8 @@ async def run_command(
             # tuberías: se termina el grupo para no colgar el job.
             _signal_group(proc.pid, signal.SIGTERM)
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(asyncio.gather(*pumps), TERM_GRACE_S)
+                await asyncio.wait_for(asyncio.shield(asyncio.gather(*pumps)), TERM_GRACE_S)
+            await _sweep_group(proc.pid, result)
         return result
     except asyncio.CancelledError:
         _signal_group(proc.pid, signal.SIGKILL)
@@ -203,19 +212,82 @@ async def run_command(
             transport.close()
 
 
+async def _exited(proc: asyncio.subprocess.Process) -> int:
+    """Espera a que termine el proceso principal (solo él, no sus tuberías)."""
+    while proc.returncode is None:
+        await asyncio.sleep(0.05)
+    return proc.returncode
+
+
 async def _terminate(pid: int, waiter: asyncio.Task[int], result: ProcResult) -> None:
-    """SIGTERM al grupo, espera acotada, SIGKILL, espera acotada. Nunca espera indefinidamente."""
+    """SIGTERM al grupo, espera acotada, SIGKILL, espera acotada. Nunca espera indefinidamente.
+
+    Que muera el líder no basta: un hijo del mismo grupo puede ignorar SIGTERM y quedarse
+    vivo (adoptado por init/launchd) con el puerto o los ficheros ocupados. Por eso, al
+    final, se barre el grupo completo (ver ``_sweep_group``).
+    """
     _signal_group(pid, signal.SIGTERM)
     try:
         await asyncio.wait_for(asyncio.shield(waiter), TERM_GRACE_S)
-        return
     except TimeoutError:
-        pass
-    _signal_group(pid, signal.SIGKILL)
+        _signal_group(pid, signal.SIGKILL)
+        try:
+            await asyncio.wait_for(asyncio.shield(waiter), KILL_GRACE_S)
+        except TimeoutError:
+            result.abandoned = True
+    await _sweep_group(pid, result)
+
+
+async def _group_members(pgid: int) -> list[int] | None:
+    """PIDs vivos (no zombis) del grupo ``pgid``; ``None`` si no se puede saber (sin ``ps``)."""
+    if not shutil.which("ps"):
+        return None
     try:
-        await asyncio.wait_for(asyncio.shield(waiter), KILL_GRACE_S)
-    except TimeoutError:
-        result.abandoned = True
+        proc = await asyncio.create_subprocess_exec(
+            "ps", "-A", "-o", "pid=,pgid=,stat=",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, stdin=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), 5)
+    except (OSError, TimeoutError):
+        return None
+    members = []
+    for line in out.decode(errors="replace").splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[1] == str(pgid) and not parts[2].startswith("Z"):
+            members.append(int(parts[0]))
+    return members
+
+
+async def _group_alive(pgid: int) -> list[int]:
+    members = await _group_members(pgid)
+    if members is not None:
+        return members
+    try:  # sin ps: killpg(0) no distingue zombis, pero es mejor que nada
+        os.killpg(pgid, 0)
+        return [pgid]
+    except (ProcessLookupError, PermissionError):
+        return []
+
+
+async def _sweep_group(pgid: int, result: ProcResult) -> None:
+    """Tras matar al líder: si queda alguien en el grupo, espera la gracia de SIGTERM y luego SIGKILL."""
+    if not hasattr(os, "killpg"):  # pragma: no cover - Windows
+        return
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + TERM_GRACE_S
+    alive = await _group_alive(pgid)
+    while alive and loop.time() < deadline:  # ya recibieron SIGTERM: se les da la misma gracia
+        await asyncio.sleep(0.2)
+        alive = await _group_alive(pgid)
+    if not alive:
+        return
+    result.killed = alive
+    _signal_group(pgid, signal.SIGKILL)
+    deadline = loop.time() + KILL_GRACE_S
+    while alive and loop.time() < deadline:
+        await asyncio.sleep(0.1)
+        alive = await _group_alive(pgid)
+    result.survivors = alive
 
 
 async def run_capture(
