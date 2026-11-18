@@ -74,3 +74,22 @@ jobs:
         run: |
           if [ "$TESTS" = "ALL" ]; then set --; else set -- $TESTS; fi
           .venv/bin/python -m pytest -q -m "e2e" "$@"
+
+  # Check único y estable para la protección de rama: los nombres de la matriz cambian y,
+  # cuando la selección omite un nivel, sus checks ni existen. Pasa si todo lo que se
+  # ejecutó pasó (un nivel omitido cuenta como bien) y falla si algo falló o se canceló.
+  resultado:
+    if: always()
+    needs: [select, puntuales, e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comprobar resultados
+        run: |
+          echo "select=${{ needs.select.result }} puntuales=${{ needs.puntuales.result }} e2e=${{ needs.e2e.result }}"
+          [ "${{ needs.select.result }}" = "success" ] || { echo "falló la selección"; exit 1; }
+          for r in "${{ needs.puntuales.result }}" "${{ needs.e2e.result }}"; do
+            case "$r" in
+              success|skipped) ;;
+              *) echo "falló un nivel de pruebas: $r"; exit 1 ;;
+            esac
+          done
