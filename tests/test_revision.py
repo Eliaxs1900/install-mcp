@@ -366,3 +366,28 @@ def test_reap_does_not_depend_on_the_program_name(config: Config, registry, tmp_
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+
+
+# ------------------------------------------------------------------ #9 (issue) ~/Library: subrutas, no entero
+def test_claude_desktop_session_folders_are_allowed_but_launchagents_are_not(tmp_path: Path):
+    from watcher_mcp.config import PROTECTED_HOME_PATHS
+
+    home = tmp_path
+    session = home / "Library" / "Application Support" / "Claude" / "scratch-workspaces" / "a" / "proyecto"
+    session.mkdir(parents=True)
+    kwargs = {"home": home, "protected_home_dirs": PROTECTED_HOME_PATHS}
+    assert ensure_safe_path(session, [home], **kwargs) == session.resolve()
+    for bad in [home / "Library" / "LaunchAgents" / "evil.plist", home / "Library" / "Keychains" / "x",
+                home / "Library" / "Application Support" / "com.apple.backgroundtaskmanagementagent" / "x",
+                home / "Library" / "Preferences" / "com.apple.Terminal.plist"]:
+        with pytest.raises(ValueError, match="zona protegida"):
+            ensure_safe_path(bad, [home], **kwargs)
+
+
+def test_protected_zone_error_says_where_and_what_to_paste(tmp_path: Path):
+    target = tmp_path / ".local" / "bin" / "jq"
+    with pytest.raises(ValueError) as err:
+        ensure_safe_path(target, [tmp_path])
+    message = str(err.value)
+    assert "~/.config/watcher-mcp/config.toml" in message and "WATCHER_MCP_CONFIG" in message
+    assert f'allowed_roots = ["~", "{target.parent.resolve()}"]' in message
