@@ -50,6 +50,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 markers = [
+    "e2e: de punta a punta con herramientas o servicios reales (pip/uv, git, HTTPS local, cliente MCP, red); las puntuales son el resto",
     "integration: lanza instaladores reales en modo offline",
     "network: necesita red e instala de verdad (solo con WATCHER_MCP_NETWORK_TESTS=1, pensado para Docker)",
 ]

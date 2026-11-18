@@ -22,6 +22,10 @@ from watcher_mcp.backends import BUILTIN
 from watcher_mcp.config import Config
 from watcher_mcp.jobs import JobManager, JobState
 
+
+# E2E: herramientas y servicios reales. Las pruebas puntuales se ejecutan con -m 'not e2e'.
+pytestmark = pytest.mark.e2e
+
 trustme = pytest.importorskip("trustme")
 
 

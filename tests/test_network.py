@@ -16,6 +16,7 @@ from watcher_mcp.config import Config
 from watcher_mcp.jobs import JobManager, JobState
 
 pytestmark = [
+    pytest.mark.e2e,
     pytest.mark.network,
     pytest.mark.skipif(os.environ.get("WATCHER_MCP_NETWORK_TESTS") != "1", reason="WATCHER_MCP_NETWORK_TESTS != 1"),
 ]

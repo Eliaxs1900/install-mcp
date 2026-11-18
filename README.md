@@ -286,6 +286,36 @@ Ver [examples/config.example.toml](examples/config.example.toml):
 `WATCHER_MCP_STATE_DIR` cambia el directorio de estado (por defecto
 `~/.local/state/watcher-mcp`).
 
+## Pruebas selectivas: puntuales y E2E
+
+Hay dos niveles de prueba:
+
+- **Puntuales**: validación, planes y núcleo con backends falsos. Son rápidas.
+- **E2E** (marcador `e2e`): herramientas y servicios reales (pip/uv, git, HTTPS local, cliente MCP, red).
+
+Si un cambio no toca una parte, se omite su prueba. Lo decide [`scripts/select_tests.py`](scripts/select_tests.py)
+con un mapa explícito fichero → tests:
+
+| Cambio | Se ejecuta |
+|---|---|
+| Núcleo (`jobs`, `process`, `config`, `security`, `server`, `notify`, base de backends, `conftest`, `pyproject`, workflow) | todo |
+| Un backend (p. ej. `backends/git.py`) | solo sus tests, separados en puntuales y E2E |
+| Solo documentación, `examples/`, demos, `Dockerfile` | nada |
+| Un fichero que no está en el mapa | todo (un olvido nunca omite pruebas) |
+
+En CI:
+
+- en un PR, las puntuales seleccionadas corren en la matriz completa y las E2E seleccionadas en un Python por sistema;
+- en `main` se ejecuta siempre todo.
+
+En local:
+
+```bash
+python scripts/select_tests.py --base origin/main --tiers         # qué tocaría
+.venv/bin/python -m pytest -q -m "not e2e"                          # todas las puntuales
+.venv/bin/python -m pytest -q -m "not e2e" $(python scripts/select_tests.py --base origin/main)
+```
+
 ## Tests y demos en Docker (sin ensuciar tu máquina)
 
 ```bash
