@@ -18,6 +18,22 @@ from pathlib import Path
 from typing import Any
 
 
+# Persistencia (se ejecuta sola), secretos y datos personales en macOS.
+PROTECTED_HOME_PATHS: tuple[str, ...] = (
+    "Library/LaunchAgents",
+    "Library/LaunchDaemons",
+    "Library/Preferences",
+    "Library/Keychains",
+    "Library/Cookies",
+    "Library/Mail",
+    "Library/Messages",
+    "Library/Safari",
+    "Library/Containers",
+    "Library/Group Containers",
+    "Library/Application Support/com.apple.*",
+)
+
+
 def _default_state_dir() -> Path:
     base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
     return Path(base) / "watcher-mcp"
@@ -71,7 +87,10 @@ class Config:
     # (``~/Library/LaunchAgents`` se ejecuta al iniciar sesión en macOS). Para permitir una de
     # esas zonas a propósito, añádela como raíz explícita (p. ej. ``~/.local/bin``).
     protect_dot_paths: bool = True
-    protected_home_dirs: list[str] = field(default_factory=lambda: ["Library"])
+    # Subrutas de HOME protegidas (comodines por componente). Concretas, no ``~/Library`` entero:
+    # ahí viven también carpetas de trabajo legítimas (p. ej. las sesiones de Claude Desktop en
+    # ``~/Library/Application Support/Claude``).
+    protected_home_dirs: list[str] = field(default_factory=lambda: list(PROTECTED_HOME_PATHS))
     # Tope duro del tiempo de un job, aunque la petición o la configuración pidan "sin límite"
     # (``job_timeout_s = 0``): ninguna espera es infinita. 0 = sin tope (no recomendado).
     max_job_timeout_s: float = 86400.0

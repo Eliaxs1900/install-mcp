@@ -136,9 +136,12 @@ flowchart LR
   - allowlist de backends;
   - sin `sudo` salvo opt-in (y entonces `sudo -n`);
   - rutas limitadas a raíces permitidas y, dentro de ellas, **zonas protegidas**: nada con un
-    componente oculto (`~/.zshrc`, `~/.ssh`, `proyecto/.git/hooks`…) ni `~/Library`, para que una
-    instrucción inyectada al cliente no pueda escribir ni leer ahí (se permiten a propósito
-    añadiéndolas como raíz explícita);
+    componente oculto (`~/.zshrc`, `~/.ssh`, `proyecto/.git/hooks`…) ni las subrutas sensibles de
+    `~/Library` (`LaunchAgents`, `Preferences`, `Keychains`, `Cookies`, `Containers`…), para que una
+    instrucción inyectada al cliente no pueda escribir ni leer ahí. El resto de `~/Library` (p. ej. las
+    carpetas de sesión de Claude Desktop en `~/Library/Application Support/Claude`) se puede usar. Una
+    zona protegida se permite a propósito añadiéndola como raíz explícita: el error dice dónde y da la
+    línea exacta;
   - las descargas no sobrescriben nada salvo `overwrite: true`; la extracción tiene límites de
     tamaño y de número de ficheros;
   - `git` neutraliza la configuración local del repo (hooks, fsmonitor, credential helpers) y no
@@ -274,8 +277,11 @@ Ver [examples/config.example.toml](examples/config.example.toml):
 - `allowed_backends`: la allowlist (por defecto solo `pip`).
 - `allow_privileged`: `false` por defecto.
 - `allowed_roots`: dónde pueden escribir (y leer ficheros pedidos) los backends.
-- `protect_dot_paths` (`true`) y `protected_home_dirs` (`["Library"]`): zonas protegidas dentro
-  de las raíces. Para usar una a propósito, añádela como raíz explícita (p. ej. `~/.local/bin`).
+- `protect_dot_paths` (`true`) y `protected_home_dirs` (subrutas de HOME con comodines; por defecto
+  las sensibles de `~/Library`: `LaunchAgents`, `Preferences`, `Keychains`, `Cookies`, `Mail`,
+  `Messages`, `Safari`, `Containers`, `Group Containers`, `Application Support/com.apple.*`): zonas
+  protegidas dentro de las raíces. Para usar una a propósito, añádela como raíz explícita (p. ej.
+  `~/.local/bin`).
 - `max_job_timeout_s` (24 h): tope duro de cualquier job. `func_cancel_grace_s` (75 s): cuánto se
   espera a que un paso interno cancelado (una descarga) suelte su hilo antes de liberar su lock.
 - Límites: `max_parallel`, `default_wait_s`, `max_wait_s`, `max_queue_s`,

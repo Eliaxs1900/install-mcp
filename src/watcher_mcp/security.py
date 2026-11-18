@@ -8,12 +8,13 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 REDACTED = "***"
@@ -160,14 +161,19 @@ def ensure_safe_path(
 
     Un cliente MCP puede recibir instrucciones inyectadas (un README, una web...): sin esta
     regla, una petición podría escribir ``~/.zshrc`` o ``~/.ssh/authorized_keys``, leer una
-    clave privada como ``requirements`` o dejar un ``LaunchAgent`` en ``~/Library``. Se rechaza,
-    relativo a la raíz permitida más profunda que contiene la ruta:
+    clave privada como ``requirements`` o dejar un ``LaunchAgent``. Se rechaza, relativo a la
+    raíz permitida más profunda que contiene la ruta:
 
     * cualquier componente que empiece por ``.`` (dotfiles, ``.ssh``, ``.config``, ``.git/hooks``...);
-    * si esa raíz es ``home``, los directorios de primer nivel de ``protected_home_dirs`` (``Library``).
+    * si esa raíz es ``home``, las subrutas de ``protected_home_dirs``: rutas relativas a HOME
+      con comodines por componente (``Library/LaunchAgents``,
+      ``Library/Application Support/com.apple.*``). Se protegen subrutas concretas y no
+      ``~/Library`` entero: ahí viven también carpetas de trabajo legítimas, como las de las
+      sesiones de Claude Desktop (``~/Library/Application Support/Claude/...``).
 
     Para permitir una de esas zonas a propósito, se añade como raíz explícita en
     ``allowed_roots`` (p. ej. ``~/.local/bin``): entonces lo relativo a ella ya no la incluye.
+    El error dice dónde se configura y da la línea exacta para pegar.
     """
     roots = [Path(r).expanduser().resolve() for r in roots]
     resolved = ensure_within_roots(path, roots, what=what)
@@ -179,16 +185,33 @@ def ensure_safe_path(
         if hidden is not None:
             raise ValueError(
                 f"La {what} {str(resolved)!r} pasa por {hidden!r}, una zona protegida (ficheros y carpetas "
-                f"ocultos: configuración, claves, hooks). Si de verdad la necesitas, añade esa carpeta "
-                f"como raíz explícita en allowed_roots."
+                f"ocultos: configuración, claves, hooks). {_allow_hint(resolved)}"
             )
     home_resolved = (home or Path.home()).expanduser().resolve()
-    if root == home_resolved and relative and relative[0] in set(protected_home_dirs):
-        raise ValueError(
-            f"La {what} {str(resolved)!r} está en ~/{relative[0]}, una zona protegida (p. ej. LaunchAgents se "
-            f"ejecutan al iniciar sesión). Si de verdad la necesitas, añádela como raíz explícita en allowed_roots."
-        )
+    if root == home_resolved:
+        for pattern in protected_home_dirs:
+            parts = PurePosixPath(pattern).parts
+            if len(relative) >= len(parts) and all(
+                fnmatch.fnmatchcase(rel, pat) for rel, pat in zip(relative, parts, strict=False)
+            ):
+                raise ValueError(
+                    f"La {what} {str(resolved)!r} está en ~/{'/'.join(relative[:len(parts)])}, una zona "
+                    f"protegida (p. ej. LaunchAgents se ejecutan al iniciar sesión; Keychains o Cookies guardan "
+                    f"secretos). {_allow_hint(resolved)}"
+                )
     return resolved
+
+
+CONFIG_LOCATIONS = "~/.config/watcher-mcp/config.toml (o el fichero de --config / $WATCHER_MCP_CONFIG)"
+
+
+def _allow_hint(resolved: Path) -> str:
+    """Cómo permitir una zona protegida: dónde se configura y la línea exacta para pegar."""
+    folder = resolved if resolved.is_dir() else resolved.parent
+    return (
+        f"Si de verdad la necesitas, añádela como raíz explícita en {CONFIG_LOCATIONS}: "
+        f'allowed_roots = ["~", "{folder}"]'
+    )
 
 
 def reject_option_like(values: Iterable[str], *, what: str) -> None:
