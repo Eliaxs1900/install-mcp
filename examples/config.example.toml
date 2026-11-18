@@ -26,10 +26,16 @@ max_jobs_kept = 200
 # (requirements, repos locales).
 allowed_roots = ["~"]
 # Zonas protegidas DENTRO de las raíces: rutas con algún componente oculto (~/.zshrc, ~/.ssh,
-# proyecto/.git/hooks...) y estos directorios de primer nivel de HOME. Para usar una a propósito,
-# añádela como raíz explícita, p. ej. allowed_roots = ["~", "~/.local/bin"].
+# proyecto/.git/hooks...) y estas subrutas de HOME (comodines por componente, sin distinguir
+# mayúsculas). Por defecto no se protege ~/Library entero: los proyectos en
+# ~/Library/Application Support (p. ej. las sesiones de Claude Desktop) funcionan. Para usar una
+# zona protegida a propósito, añádela como raíz explícita, p. ej. allowed_roots = ["~", "~/.local/bin"].
 protect_dot_paths = true
-protected_home_dirs = ["Library"]
+# protected_home_dirs = ["Library/LaunchAgents", "Library/LaunchDaemons", "Library/Preferences",
+#                        "Library/Keychains", "Library/Containers", "Library/Group Containers",
+#                        "Library/Cookies", "Library/Mail", "Library/Messages", "Library/Safari",
+#                        "Library/Application Support/com.apple.*"]
+# Valor antiguo, más estricto (bloquea ~/Library entero): protected_home_dirs = ["Library"]
 
 # Tope duro de cualquier job, aunque se pida "sin límite" (job_timeout_s = 0).
 max_job_timeout_s = 86400

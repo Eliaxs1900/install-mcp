@@ -23,6 +23,24 @@ def _default_state_dir() -> Path:
     return Path(base) / "watcher-mcp"
 
 
+# Arranque automático (LaunchAgents/Daemons, elementos de inicio), preferencias, credenciales
+# y datos de apps del sistema. Escribir ahí es la forma típica de persistir o robar datos.
+DEFAULT_PROTECTED_HOME_DIRS = (
+    "Library/LaunchAgents",
+    "Library/LaunchDaemons",
+    "Library/Preferences",
+    "Library/Keychains",
+    "Library/Containers",
+    "Library/Group Containers",
+    "Library/Cookies",
+    "Library/Mail",
+    "Library/Messages",
+    "Library/Safari",
+    "Library/Application Support/com.apple.*",
+)
+DEFAULT_CONFIG_FILE = Path("~/.config/watcher-mcp/config.toml")
+
+
 @dataclass
 class Config:
     # Dónde se persisten jobs (``jobs/<id>/``) y los venvs por nombre (``venvs/<nombre>``).
@@ -67,11 +85,13 @@ class Config:
     # ficheros que indique la petición (requirements, repos locales...).
     allowed_roots: list[Path] = field(default_factory=lambda: [Path.home()])
     # Dentro de las raíces se protegen las rutas con algún componente oculto (``~/.zshrc``,
-    # ``~/.ssh``, ``proyecto/.git/hooks``...) y, en HOME, estos directorios de primer nivel
-    # (``~/Library/LaunchAgents`` se ejecuta al iniciar sesión en macOS). Para permitir una de
-    # esas zonas a propósito, añádela como raíz explícita (p. ej. ``~/.local/bin``).
+    # ``~/.ssh``, ``proyecto/.git/hooks``...) y, en HOME, estas subrutas (comodines por
+    # componente, sin distinguir mayúsculas). No se protege ``~/Library`` entero: ahí viven
+    # proyectos legítimos, como las carpetas de sesión de Claude Desktop
+    # (``~/Library/Application Support/Claude/scratch-workspaces``). Para permitir una zona
+    # protegida a propósito, añádela como raíz explícita (p. ej. ``~/.local/bin``).
     protect_dot_paths: bool = True
-    protected_home_dirs: list[str] = field(default_factory=lambda: ["Library"])
+    protected_home_dirs: list[str] = field(default_factory=lambda: list(DEFAULT_PROTECTED_HOME_DIRS))
     # Tope duro del tiempo de un job, aunque la petición o la configuración pidan "sin límite"
     # (``job_timeout_s = 0``): ninguna espera es infinita. 0 = sin tope (no recomendado).
     max_job_timeout_s: float = 86400.0
@@ -108,12 +128,33 @@ class Config:
 
     def safe_path(self, path: str | Path, *, what: str) -> Path:
         """Ruta dentro de las raíces y fuera de las zonas protegidas (ver ``ensure_safe_path``)."""
-        from .security import ensure_safe_path
+        from .security import ProtectedPathError, ensure_safe_path
 
-        return ensure_safe_path(
-            path, self.roots(), what=what,
-            protected_home_dirs=self.protected_home_dirs, protect_dot_paths=self.protect_dot_paths,
+        try:
+            return ensure_safe_path(
+                path, self.roots(), what=what,
+                protected_home_dirs=self.protected_home_dirs, protect_dot_paths=self.protect_dot_paths,
+            )
+        except ProtectedPathError as exc:
+            raise ProtectedPathError(f"{exc} {self.allow_hint(exc.zone)}", exc.zone) from None
+
+    def allow_hint(self, zone: Path) -> str:
+        """Cómo permitir ``zone``: qué fichero editar y la línea exacta para pegar."""
+        home = str(Path.home())
+
+        def show(p: Path | str) -> str:
+            text = str(p)
+            return "~" + text[len(home):] if text == home or text.startswith(home + "/") else text
+
+        roots = [show(Path(r).expanduser()) for r in self.allowed_roots]
+        line = "allowed_roots = [" + ", ".join(f'"{r}"' for r in [*roots, show(zone)]) + "]"
+        source = getattr(self, "_source", None)
+        where = (
+            f"en {show(source)}" if source
+            else f"en {show(DEFAULT_CONFIG_FILE.expanduser())} (no existe todavía: créalo; también vale "
+            "--config RUTA o $WATCHER_MCP_CONFIG) y reinicia el servidor"
         )
+        return f"Si de verdad la necesitas, añádela como raíz explícita {where}: {line}"
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> Config:
@@ -126,6 +167,7 @@ class Config:
             with open(Path(candidate).expanduser(), "rb") as fh:
                 data = tomllib.load(fh)
         cfg = cls.from_dict(data)
+        cfg._source = Path(candidate).expanduser() if candidate is not None else None  # type: ignore[attr-defined]
         if env_state := os.environ.get("WATCHER_MCP_STATE_DIR"):
             cfg.state_dir = Path(env_state).expanduser()
         return cfg

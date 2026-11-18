@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import re
 from collections.abc import Iterable
@@ -147,6 +148,24 @@ def ensure_within_roots(path: str | Path, roots: Iterable[Path], *, what: str = 
     raise ValueError(f"La {what} {str(resolved)!r} está fuera de las raíces permitidas ({', '.join(map(str, roots))})")
 
 
+class ProtectedPathError(ValueError):
+    """Ruta dentro de las raíces pero en una zona protegida; ``zone`` es la carpeta a permitir."""
+
+    def __init__(self, message: str, zone: Path) -> None:
+        super().__init__(message)
+        self.zone = zone
+
+
+def _matches_zone(relative: tuple[str, ...], pattern: str) -> bool:
+    """``pattern`` es una ruta relativa con comodines por componente (``Library/LaunchAgents``,
+    ``Library/Application Support/com.apple.*``). Sin distinguir mayúsculas: el disco de macOS
+    tampoco las distingue, y ``~/library/launchagents`` es la misma carpeta."""
+    parts = [p for p in pattern.strip("/").split("/") if p]
+    if not parts or len(relative) < len(parts):
+        return False
+    return all(fnmatch.fnmatchcase(r.lower(), p.lower()) for r, p in zip(relative, parts, strict=False))
+
+
 def ensure_safe_path(
     path: str | Path,
     roots: Iterable[Path],
@@ -164,10 +183,13 @@ def ensure_safe_path(
     relativo a la raíz permitida más profunda que contiene la ruta:
 
     * cualquier componente que empiece por ``.`` (dotfiles, ``.ssh``, ``.config``, ``.git/hooks``...);
-    * si esa raíz es ``home``, los directorios de primer nivel de ``protected_home_dirs`` (``Library``).
+    * si esa raíz es ``home``, las subrutas de ``protected_home_dirs`` (``Library/LaunchAgents``,
+      ``Library/Keychains``...; admiten comodines por componente). El resto de ``~/Library``
+      —por ejemplo las carpetas de sesión de Claude Desktop en ``Application Support``— se permite.
 
     Para permitir una de esas zonas a propósito, se añade como raíz explícita en
     ``allowed_roots`` (p. ej. ``~/.local/bin``): entonces lo relativo a ella ya no la incluye.
+    Los errores son :class:`ProtectedPathError` con la carpeta a permitir en ``zone``.
     """
     roots = [Path(r).expanduser().resolve() for r in roots]
     resolved = ensure_within_roots(path, roots, what=what)
@@ -175,19 +197,23 @@ def ensure_safe_path(
     root = max(containing, key=lambda r: len(r.parts))
     relative = resolved.relative_to(root).parts
     if protect_dot_paths:
-        hidden = next((part for part in relative if part.startswith(".")), None)
-        if hidden is not None:
-            raise ValueError(
-                f"La {what} {str(resolved)!r} pasa por {hidden!r}, una zona protegida (ficheros y carpetas "
-                f"ocultos: configuración, claves, hooks). Si de verdad la necesitas, añade esa carpeta "
-                f"como raíz explícita en allowed_roots."
+        idx = next((i for i, part in enumerate(relative) if part.startswith(".")), None)
+        if idx is not None:
+            raise ProtectedPathError(
+                f"La {what} {str(resolved)!r} pasa por {relative[idx]!r}, una zona protegida (ficheros y "
+                f"carpetas ocultos: configuración, claves, hooks).",
+                root.joinpath(*relative[: idx + 1]),
             )
     home_resolved = (home or Path.home()).expanduser().resolve()
-    if root == home_resolved and relative and relative[0] in set(protected_home_dirs):
-        raise ValueError(
-            f"La {what} {str(resolved)!r} está en ~/{relative[0]}, una zona protegida (p. ej. LaunchAgents se "
-            f"ejecutan al iniciar sesión). Si de verdad la necesitas, añádela como raíz explícita en allowed_roots."
-        )
+    if root == home_resolved and relative:
+        zone = next((z for z in protected_home_dirs if _matches_zone(relative, z)), None)
+        if zone is not None:
+            depth = len([p for p in zone.strip("/").split("/") if p])
+            raise ProtectedPathError(
+                f"La {what} {str(resolved)!r} está en ~/{'/'.join(relative[:depth])}, una zona protegida "
+                f"(arranque automático, preferencias, credenciales o datos de apps del sistema).",
+                root.joinpath(*relative[:depth]),
+            )
     return resolved
 
 
