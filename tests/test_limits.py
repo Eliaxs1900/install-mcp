@@ -31,7 +31,9 @@ async def test_stalled_then_resumed(manager: JobManager):
     )
     # Se detecta el atasco mientras el proceso sigue vivo, sin esperar a que termine.
     t0 = time.monotonic()
-    while job.state != JobState.STALLED:
+    # Se espera al evento, no solo al estado: en Python 3.11 asyncio.wait_for ejecuta el listener
+    # en una tarea aparte, así que el estado cambia un instante antes de que llegue el evento.
+    while job.state != JobState.STALLED or not any(e.kind == "stalled" for e in events):
         assert time.monotonic() - t0 < 3, "debería pasar a stalled"
         await asyncio.sleep(0.05)
     assert not job.done.is_set() and _alive(job.pid)
