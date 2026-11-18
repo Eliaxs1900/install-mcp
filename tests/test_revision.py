@@ -331,3 +331,38 @@ async def test_secret_params_never_reach_job_json(manager: JobManager):
 # ------------------------------------------------------------------ #15 tests aislados de git global
 def test_tests_do_not_inherit_user_git_config():
     assert os.environ["GIT_CONFIG_GLOBAL"] == os.devnull and os.environ["GIT_CONFIG_NOSYSTEM"] == "1"
+
+
+def _spawn_group() -> "subprocess.Popen[bytes]":
+    import subprocess
+
+    return subprocess.Popen(["sleep", "30"], start_new_session=True)
+
+
+def test_reap_never_kills_a_reused_pid(config: Config, registry, tmp_path: Path):
+    """Si el pid está ahora en un proceso que arrancó a otra hora, no es nuestro: no se toca."""
+    proc = _spawn_group()
+    try:
+        job = Job("x", "fake", {}, Plan("s", []), tmp_path / "j", Redactor(), 10)
+        job.pid, job.current_command = proc.pid, ["/usr/bin/sleep"]
+        job.pid_started_at = time.time() - 3600  # el job original arrancó hace una hora
+        JobManager(config, registry)._reap_orphan(job)
+        assert proc.poll() is None, "mató un proceso ajeno que reutilizó el pid"
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_reap_does_not_depend_on_the_program_name(config: Config, registry, tmp_path: Path):
+    """Python de framework en macOS: ps muestra Python.app/.../Python, no el nombre lanzado."""
+    proc = _spawn_group()
+    try:
+        job = Job("x", "fake", {}, Plan("s", []), tmp_path / "j", Redactor(), 10)
+        job.pid, job.current_command = proc.pid, ["/nada/que/ver/python"]
+        job.pid_started_at = time.time()
+        JobManager(config, registry)._reap_orphan(job)
+        assert proc.wait(timeout=6) is not None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()

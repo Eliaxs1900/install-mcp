@@ -183,6 +183,8 @@ class Job:
         self.current_command: list[str] | None = None
         self.step_stall_s: float | None = None  # umbral de atasco del paso en curso
         self.pid: int | None = None
+        # Hora (epoch) a la que arrancó el proceso del paso: identifica el grupo aunque el pid se reutilice.
+        self.pid_started_at: float | None = None
         self.last_output_at: float | None = None
         self.stalls = 0
         self.timed_out_reason: str | None = None
@@ -315,7 +317,8 @@ class Job:
             d["foreign"] = True
             d["note"] = "en curso en otra sesión del servidor (solo lectura desde aquí)"
         if self.state in ACTIVE:
-            d.update(pid=self.pid, command=self.current_command, silent_for_s=self.silent_for())
+            d.update(pid=self.pid, pid_started_at=self.pid_started_at, command=self.current_command,
+                     silent_for_s=self.silent_for())
         if self.installed:
             d["installed"] = self.installed
         if tail:
@@ -349,6 +352,7 @@ class Job:
                   owner=data.get("owner"))
         job.pid = data.get("pid")
         job.current_command = data.get("command")
+        job.pid_started_at = data.get("pid_started_at")
         job.steps = [StepRecord(s["name"], s.get("state", "?"), s.get("exit_code")) for s in data.get("steps", [])]
         job.exit_code = data.get("exit_code")
         job.error = data.get("error")
@@ -373,6 +377,44 @@ class Job:
         if job.state in TERMINAL:
             job.done.set()
         return job
+
+
+# Margen al comparar la hora de inicio guardada con la que da ``ps`` (resolución de 1 s).
+PID_START_TOLERANCE_S = 3.0
+
+
+def _parse_etime(value: str) -> float | None:
+    """``ps -o etime`` ([[dd-]hh:]mm:ss) a segundos; mismo formato en macOS y Linux."""
+    try:
+        days, _, rest = value.strip().rpartition("-")
+        parts = [int(p) for p in rest.split(":")]
+        while len(parts) < 3:
+            parts.insert(0, 0)
+        h, m, s = parts
+        return (int(days) if days else 0) * 86400 + h * 3600 + m * 60 + s
+    except ValueError:
+        return None
+
+
+def _group_members(pgid: int) -> dict[int, float]:
+    """Procesos vivos (no zombis) del grupo ``pgid`` -> su hora de inicio (epoch)."""
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,etime=,stat="], capture_output=True, text=True,
+                             timeout=5, env={**os.environ, "LC_ALL": "C"})
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    now = time.time()
+    members: dict[int, float] = {}
+    for line in out.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 4 or not fields[0].isdigit() or not fields[1].isdigit():
+            continue
+        if int(fields[1]) != pgid or fields[3].startswith("Z"):
+            continue
+        elapsed = _parse_etime(fields[2])
+        if elapsed is not None:
+            members[int(fields[0])] = now - elapsed
+    return members
 
 
 class JobError(ValueError):
@@ -445,28 +487,33 @@ class JobManager:
         """Termina el grupo de procesos de un job cuya instancia murió de golpe (kill -9, crash).
 
         Los procesos arrancan en su propio grupo (start_new_session), así que no reciben SIGHUP
-        cuando muere el servidor y seguirían corriendo sin vigilancia. Antes de matar se
-        comprueba con ``ps`` que el pid sigue siendo el mismo programa (un pid se puede reutilizar).
+        cuando muere el servidor y seguirían corriendo sin vigilancia.
+
+        Un pid se puede reutilizar, así que antes de matar se comprueba que el grupo es el MISMO
+        por su hora de inicio (``pid_started_at``, guardada al arrancar), no por el nombre del
+        programa: un Python de framework en macOS se re-ejecuta como ``Python.app/.../Python`` y
+        ``ps`` no muestra el nombre con el que se lanzó.
         """
-        pid, command = job.pid, job.current_command
-        if not pid or not command or not hasattr(os, "killpg"):
+        pid, started = job.pid, job.pid_started_at
+        if not pid or started is None or not hasattr(os, "killpg"):
+            return  # sin hora de inicio no se puede verificar: mejor no matar nada
+        members = _group_members(pid)
+        if not members:
             return
-        try:
-            out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
-        except (OSError, subprocess.SubprocessError):
-            return
-        program = Path(command[0]).name
-        if out.returncode != 0 or program not in out.stdout:
-            return  # ya no existe, o el pid es ahora de otro programa
-        job.add_line("core", f"proceso huérfano {pid} ({program}) de una instancia que murió: terminando su grupo")
+        leader = members.get(pid)
+        if leader is not None:
+            if abs(leader - started) > PID_START_TOLERANCE_S:
+                return  # el pid es ahora de otro proceso
+        elif any(start < started - PID_START_TOLERANCE_S for start in members.values()):
+            return  # el líder ya no existe y el grupo es anterior: no es el nuestro
+        job.add_line("core", f"grupo de procesos huérfano {pid} ({len(members)} proceso(s)) de una instancia "
+                             "que murió: terminando")
         for sig, grace in ((signal.SIGTERM, 3.0), (signal.SIGKILL, 2.0)):
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(pid, sig)
             deadline = time.monotonic() + grace
             while time.monotonic() < deadline:
-                try:
-                    os.killpg(pid, 0)
-                except (ProcessLookupError, PermissionError):
+                if not _group_members(pid):  # los zombis no cuentan: ya no ejecutan nada
                     return
                 time.sleep(0.1)
 
@@ -743,6 +790,7 @@ class JobManager:
 
         def on_start(pid: int) -> None:
             job.pid = pid
+            job.pid_started_at = time.time()
             job.add_line("core", f"pid {pid}", activity=True)
             with contextlib.suppress(OSError):
                 job.persist()  # pid y comando en disco: otra instancia podrá recoger el huérfano
@@ -848,6 +896,7 @@ class JobManager:
                 rec.state, rec.started_at, job.current_step = "running", time.time(), step.name
                 job.current_command = None
                 job.pid = None
+                job.pid_started_at = None
                 job.lines_in_step = 0
                 job.last_output_at = time.time()
                 job.step_stall_s = first(getattr(step, "stall_timeout_s", None), job.limits.stall_timeout_s) or None
