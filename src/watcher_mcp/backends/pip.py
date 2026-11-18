@@ -22,7 +22,7 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from ..security import ensure_within_roots, reject_option_like, require_https, url_secrets
+from ..security import reject_option_like, require_https, url_secrets
 from .base import Backend, BackendParams, CommandStep, Plan, Probe
 
 # Subconjunto de PEP 508 sin URLs: nombre[extras] (especificadores) (; marcadores)
@@ -35,6 +35,7 @@ _REQ = re.compile(
 )
 _VENV_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _PY_VERSION = re.compile(r"^3(\.\d{1,2}){0,2}$")
+_PY_EXE = re.compile(r"^python3(\.\d{1,2})?t?$")
 
 _PROBE_CODE = (
     "import json, importlib.metadata as m, sys; "
@@ -95,12 +96,16 @@ class PipBackend(Backend[PipParams]):
             if not _REQ.match(req):
                 raise ValueError(f"requisito no válido (o con URL, no admitida): {req!r}")
         if spec.requirements:
-            p = Path(spec.requirements).expanduser()
-            if not p.is_absolute() or not p.is_file():
-                raise ValueError(f"requirements debe ser una ruta absoluta a un fichero existente: {spec.requirements!r}")
+            # Dentro de las raíces y fuera de zonas protegidas: pip/uv copian en su error las líneas
+            # que no entienden, así que leer un fichero arbitrario (~/.ssh/...) lo filtraría al log.
+            p = self.config.safe_path(spec.requirements, what="requirements")
+            if not p.is_file():
+                raise ValueError(f"requirements debe ser un fichero existente: {spec.requirements!r}")
         self.venv_path(spec)  # valida nombre/ruta
         if spec.python and not (_PY_VERSION.match(spec.python) or Path(spec.python).is_absolute()):
             raise ValueError("python debe ser una versión como '3.12' o una ruta absoluta")
+        if spec.python and Path(spec.python).is_absolute() and not _PY_EXE.match(Path(spec.python).name):
+            raise ValueError(f"python debe ser un intérprete (python3, python3.12...), no {Path(spec.python).name!r}")
         if spec.python and Path(spec.python).is_absolute() and not os.access(spec.python, os.X_OK):
             raise ValueError(f"el intérprete {spec.python!r} no existe o no es ejecutable")
         for url in [u for u in [spec.index_url, *spec.extra_index_urls] if u]:
@@ -108,7 +113,7 @@ class PipBackend(Backend[PipParams]):
         for link in spec.find_links:
             if link.startswith(("http://", "https://")):
                 require_https(link, what="find_links")
-            elif not (Path(link).is_absolute() and Path(link).is_dir()):
+            elif not (Path(link).is_absolute() and self.config.safe_path(link, what="find_links").is_dir()):
                 raise ValueError(f"find_links debe ser una URL https o un directorio absoluto existente: {link!r}")
         if spec.installer == "uv" and not self.uv():
             raise ValueError("installer='uv' pero uv no está en PATH")
@@ -133,7 +138,7 @@ class PipBackend(Backend[PipParams]):
     def venv_path(self, spec: PipParams) -> Path:
         if _VENV_NAME.match(spec.venv):
             return (self.config.venvs_dir / spec.venv).expanduser().resolve()
-        return ensure_within_roots(spec.venv, self.config.roots(), what="ruta del venv")
+        return self.config.safe_path(spec.venv, what="ruta del venv")
 
     @staticmethod
     def venv_python(venv: Path) -> Path:

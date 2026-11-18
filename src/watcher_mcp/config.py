@@ -63,8 +63,21 @@ class Config:
     memory_log_lines: int = 5000
     # Jobs terminados que se conservan en disco; los más antiguos se borran.
     max_jobs_kept: int = 200
-    # Raíces bajo las que los backends pueden escribir (venvs, clones, descargas).
+    # Raíces bajo las que los backends pueden escribir (venvs, clones, descargas) y leer
+    # ficheros que indique la petición (requirements, repos locales...).
     allowed_roots: list[Path] = field(default_factory=lambda: [Path.home()])
+    # Dentro de las raíces se protegen las rutas con algún componente oculto (``~/.zshrc``,
+    # ``~/.ssh``, ``proyecto/.git/hooks``...) y, en HOME, estos directorios de primer nivel
+    # (``~/Library/LaunchAgents`` se ejecuta al iniciar sesión en macOS). Para permitir una de
+    # esas zonas a propósito, añádela como raíz explícita (p. ej. ``~/.local/bin``).
+    protect_dot_paths: bool = True
+    protected_home_dirs: list[str] = field(default_factory=lambda: ["Library"])
+    # Tope duro del tiempo de un job, aunque la petición o la configuración pidan "sin límite"
+    # (``job_timeout_s = 0``): ninguna espera es infinita. 0 = sin tope (no recomendado).
+    max_job_timeout_s: float = 86400.0
+    # Al cancelar un paso interno (p. ej. una descarga en un hilo), cuánto se espera a que
+    # termine de verdad antes de liberar su lock: debe cubrir el timeout de lectura de red.
+    func_cancel_grace_s: float = 75.0
     # Patrones regex adicionales a redactar en logs.
     redact_patterns: list[str] = field(default_factory=list)
     # Backends externos a cargar: ``"paquete.modulo:Clase"``.
@@ -83,11 +96,24 @@ class Config:
     def backend_options(self, name: str) -> dict[str, Any]:
         return dict(self.backends.get(name, {}))
 
+    @property
+    def instances_dir(self) -> Path:
+        return self.state_dir / "instances"
+
     def roots(self) -> list[Path]:
         """Raíces permitidas (siempre incluye ``state_dir``)."""
         roots = [p.expanduser().resolve() for p in self.allowed_roots]
         roots.append(self.state_dir.expanduser().resolve())
         return roots
+
+    def safe_path(self, path: str | Path, *, what: str) -> Path:
+        """Ruta dentro de las raíces y fuera de las zonas protegidas (ver ``ensure_safe_path``)."""
+        from .security import ensure_safe_path
+
+        return ensure_safe_path(
+            path, self.roots(), what=what,
+            protected_home_dirs=self.protected_home_dirs, protect_dot_paths=self.protect_dot_paths,
+        )
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> Config:

@@ -18,7 +18,7 @@ def cfg(tmp_path: Path) -> Config:
         state_dir=tmp_path / "state",
         allowed_backends=list(BUILTIN),
         allowed_roots=[tmp_path],
-        backends={"run": {"programs": ["python3"]}, "maven": {"mvn_path": "/bin/echo"}},
+        backends={"run": {"programs": ["python3"], "env_allow": ["API_TOKEN"]}, "maven": {"mvn_path": "/bin/echo"}},
     )
 
 
@@ -156,7 +156,11 @@ def test_run_allowlist(cfg, tmp_path):
                          "env": {"API_TOKEN": "supersecret-value"}})
     plan = run.plan(spec)
     assert argv(plan) == ["python3", "-c", "print(1)"] and "supersecret-value" in plan.secrets
-    for bad in [{"program": "sh"}, {"cwd": "/etc"}, {"env": {"LD_PRELOAD": "x"}}, {"env": {"PATH": "/tmp"}}]:
+    for bad in [{"program": "sh"}, {"cwd": "/etc"}, {"env": {"LD_PRELOAD": "x"}}, {"env": {"PATH": "/tmp"}},
+                # Inyección de código en programas "permitidos": antes pasaban la lista de prohibidas
+                {"env": {"NODE_OPTIONS": "--require /tmp/x.js"}}, {"env": {"JAVA_TOOL_OPTIONS": "-javaagent:x"}},
+                {"env": {"PYTEST_ADDOPTS": "-p evil"}}, {"env": {"GIT_CONFIG_GLOBAL": "/tmp/c"}},
+                {"env": {"HOME": "/tmp"}}, {"cwd": str(tmp_path / ".git")}]:
         with pytest.raises(ValueError):
             run.validate({"program": "python3", "cwd": str(tmp_path), **bad})
 

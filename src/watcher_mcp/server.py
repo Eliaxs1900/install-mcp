@@ -43,7 +43,7 @@ def create_server(
     config = config or Config.load()
     manager = JobManager(config, registry if registry is not None else load_registry(config.plugins))
     manager.load_history()
-    mcp = MCPServer(name="watcher-mcp", instructions=INSTRUCTIONS, version="0.2.0")
+    mcp = MCPServer(name="watcher-mcp", instructions=INSTRUCTIONS, version="0.3.0")
     notifier = McpNotifier(bus=getattr(mcp, "_subscriptions", None))
     manager.listeners.append(notifier.on_event)
 

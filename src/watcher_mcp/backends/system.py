@@ -165,6 +165,13 @@ class DockerBackend(Backend[DockerParams]):
 # --------------------------------------------------------------------------- run
 _ENV_KEY = re.compile(r"^[A-Z_][A-Z0-9_]{0,63}$")
 _ENV_FORBIDDEN = re.compile(r"^(LD_|DYLD_)|^(PATH|PYTHONPATH|PYTHONSTARTUP|BASH_ENV|ENV|IFS)$")
+# Lista de PERMITIDAS: una lista de prohibidas siempre se queda corta (NODE_OPTIONS, JAVA_TOOL_OPTIONS,
+# MAVEN_OPTS, PYTEST_ADDOPTS, GIT_CONFIG_*, PERL5OPT, HOME... inyectan código en programas
+# "permitidos"). Se amplía con [backends.run] env_allow = ["MI_VAR", ...].
+_ENV_ALLOWED = frozenset({
+    "CI", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ", "NO_COLOR", "FORCE_COLOR",
+    "COLUMNS", "LINES", "PYTHONIOENCODING", "PYTHONUTF8", "PYTHONDONTWRITEBYTECODE", "PYTHONHASHSEED",
+})
 
 
 class RunParams(LimitParams):
@@ -203,13 +210,17 @@ class RunBackend(Backend[RunParams]):
         for a in spec.args:
             if len(a) > 4096 or "\x00" in a:
                 raise ValueError("argumento demasiado largo o con NUL")
+        allowed = _ENV_ALLOWED | {str(v) for v in self.options.get("env_allow", [])}
         for k in spec.env:
-            if not _ENV_KEY.match(k) or _ENV_FORBIDDEN.search(k):
-                raise ValueError(f"variable de entorno no permitida: {k!r}")
-        existing_dir(spec.cwd, self.config.roots(), what="cwd")
+            if not _ENV_KEY.match(k) or _ENV_FORBIDDEN.search(k) or k not in allowed:
+                raise ValueError(
+                    f"variable de entorno no permitida: {k!r}; permitidas: {sorted(allowed)} "
+                    "(amplíalas con [backends.run] env_allow)"
+                )
+        existing_dir(spec.cwd, self.config, what="cwd")
 
     def plan(self, spec: RunParams) -> Plan:
-        cwd = existing_dir(spec.cwd, self.config.roots(), what="cwd")
+        cwd = existing_dir(spec.cwd, self.config, what="cwd")
         return Plan(
             summary=f"{spec.program} {' '.join(spec.args)[:80]} (en {cwd})",
             steps=[

@@ -104,7 +104,7 @@ async def mgr(tmp_path, https):
         allowed_backends=list(BUILTIN),
         allowed_roots=[tmp_path],
         backends={"download": {"ca_bundle": str(ca_file), "read_timeout_s": 3},
-                  "run": {"programs": [Path(sys.executable).name]}},
+                  "run": {"programs": [Path(sys.executable).name], "env_allow": ["MY_TOKEN"]}},
     )
     m = JobManager(cfg, BUILTIN)
     yield m

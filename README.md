@@ -135,9 +135,23 @@ flowchart LR
   - se rechazan los valores que empiezan por `-`;
   - allowlist de backends;
   - sin `sudo` salvo opt-in (y entonces `sudo -n`);
-  - rutas limitadas a raíces permitidas;
+  - rutas limitadas a raíces permitidas y, dentro de ellas, **zonas protegidas**: nada con un
+    componente oculto (`~/.zshrc`, `~/.ssh`, `proyecto/.git/hooks`…) ni `~/Library`, para que una
+    instrucción inyectada al cliente no pueda escribir ni leer ahí (se permiten a propósito
+    añadiéndolas como raíz explícita);
+  - las descargas no sobrescriben nada salvo `overwrite: true`; la extracción tiene límites de
+    tamaño y de número de ficheros;
+  - `git` neutraliza la configuración local del repo (hooks, fsmonitor, credential helpers) y no
+    actualiza repos que no clonó salvo `trust_existing: true`;
+  - `npm` sin scripts de instalación por defecto; `run` con lista de variables de entorno
+    permitidas;
   - solo HTTPS;
-  - redacción de tokens y contraseñas en logs, argv e informes.
+  - redacción de tokens y contraseñas en logs, argv, informes y parámetros guardados.
+- **Varias sesiones a la vez**: cada sesión de Claude Code arranca su propio servidor y todos
+  comparten `state_dir`. Cada servidor se identifica con un `flock`: los jobs en curso de otra
+  sesión se ven en solo lectura (no se marcan, cancelan ni borran), y los de un servidor que murió
+  de golpe se recogen al arrancar el siguiente (se termina su grupo de procesos tras comprobar que
+  el pid sigue siendo el mismo programa). En Linux, además, el hijo muere con el servidor.
 
 Diseño completo en [docs/design.md](docs/design.md).
 
@@ -232,7 +246,7 @@ programs = ["mvn", "pytest", "make"]     # lo único que `run` puede ejecutar
 |---|---|---|
 | `wait` | 60 s (`default_wait_s`), tope duro 300 s (`max_wait_s`) | `done: false` + estado, pid, `silent_for_s`, últimas líneas |
 | Tiempo en cola | 3600 s (`max_queue_s`) | `timed_out` |
-| Duración del job | 3600 s (`default_job_timeout_s`) | SIGTERM al grupo, 5 s, SIGKILL; `timed_out` |
+| Duración del job | 3600 s (`default_job_timeout_s`); tope duro 24 h (`max_job_timeout_s`), también con "sin límite" | SIGTERM al grupo, 5 s, SIGKILL; `timed_out` |
 | Sin salida | 300 s (`default_stall_timeout_s`; pip 600 s) | `stalled` + aviso con pid, comando y últimas líneas (no mata el proceso) |
 
 Se fijan por petición (pip: `job_timeout_s`, `stall_timeout_s`), por backend en la
@@ -243,14 +257,14 @@ configuración (`[backends.pip] job_timeout_s = 1800`) o globalmente.
 | Param | Ejemplo | Notas |
 |---|---|---|
 | `packages` | `["pypdf", "requests>=2.32"]` | PEP 508 sin URLs; nada que empiece por `-`. |
-| `requirements` | `"/abs/requirements.txt"` | Alternativa o complemento a `packages`. |
+| `requirements` | `"/abs/requirements.txt"` | Alternativa o complemento a `packages`. Dentro de `allowed_roots` y fuera de zonas protegidas (pip/uv copian en su error las líneas que no entienden). |
 | `venv` | `"tools"` o `"/abs/ruta/.venv"` | Un nombre crea `<state_dir>/venvs/<nombre>`; una ruta debe estar dentro de `allowed_roots`. |
-| `python` | `"3.12"` o `"/abs/python3"` | Versión con uv (o `python3.12` en PATH). |
+| `python` | `"3.12"` o `"/abs/python3"` | Versión con uv (o `python3.12` en PATH). Una ruta debe llamarse `python3…`. |
 | `installer` | `"auto"` / `"uv"` / `"pip"` | `auto` = uv si está. |
 | `upgrade`, `pre` | `true` | |
 | `index_url`, `extra_index_urls` | `"https://…/simple"` | Solo https; credenciales redactadas. |
 | `find_links`, `no_index` | `["/abs/wheels"]`, `true` | Instalación offline. |
-| `job_timeout_s` | `1800` | Al vencer: `timed_out` (0 = sin límite). |
+| `job_timeout_s` | `1800` | Al vencer: `timed_out` (0 = hasta el tope duro `max_job_timeout_s`). |
 | `stall_timeout_s` | `120` | Sin salida N s → `stalled` (0 = sin watchdog). |
 
 ## Configuración
@@ -259,7 +273,11 @@ Ver [examples/config.example.toml](examples/config.example.toml):
 
 - `allowed_backends`: la allowlist (por defecto solo `pip`).
 - `allow_privileged`: `false` por defecto.
-- `allowed_roots`: dónde pueden escribir los backends.
+- `allowed_roots`: dónde pueden escribir (y leer ficheros pedidos) los backends.
+- `protect_dot_paths` (`true`) y `protected_home_dirs` (`["Library"]`): zonas protegidas dentro
+  de las raíces. Para usar una a propósito, añádela como raíz explícita (p. ej. `~/.local/bin`).
+- `max_job_timeout_s` (24 h): tope duro de cualquier job. `func_cancel_grace_s` (75 s): cuánto se
+  espera a que un paso interno cancelado (una descarga) suelte su hilo antes de liberar su lock.
 - Límites: `max_parallel`, `default_wait_s`, `max_wait_s`, `max_queue_s`,
   `default_job_timeout_s`, `default_stall_timeout_s`, `default_io_mode`.
 - `[backends.<nombre>]`: límites e `io_mode` propios de un backend.
@@ -334,7 +352,10 @@ tests/                   pytest
   no de instalación real en CI.
 - Funciona en macOS y Linux (también WSL). En Windows nativo faltaría la cancelación
   por grupo de procesos.
-- Los jobs en curso no sobreviven a un reinicio del servidor: se marcan como interrumpidos.
+- Los jobs en curso no sobreviven a un reinicio del servidor: se marcan como interrumpidos y sus
+  procesos se terminan al arrancar la siguiente instancia (en macOS, hasta entonces siguen vivos).
+- `binary` ejecuta el binario descargado para leer su versión: instalar un ejecutable de Internet
+  implica confiar en él (el checksum lo da la misma petición).
 - Usa el SDK `mcp` 2.x (`MCPServer`, el sucesor de FastMCP).
 
 ## Licencia

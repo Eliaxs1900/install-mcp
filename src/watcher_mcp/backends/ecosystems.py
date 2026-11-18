@@ -42,7 +42,11 @@ class NpmParams(LimitParams):
         None, description="Instalar las dependencias de un proyecto existente (npm ci / pnpm / yarn)."
     )
     manager: Literal["auto", "npm", "pnpm", "yarn"] = Field("auto", description="Solo en modo proyecto.")
-    ignore_scripts: bool = Field(False, description="No ejecutar scripts de ciclo de vida (más seguro).")
+    ignore_scripts: bool = Field(
+        True,
+        description="No ejecutar scripts de ciclo de vida (por defecto, más seguro). Pon false para paquetes "
+        "que los necesitan (binarios nativos: esbuild, sharp...).",
+    )
 
 
 class NpmBackend(Backend[NpmParams]):
@@ -56,14 +60,14 @@ class NpmBackend(Backend[NpmParams]):
             raise ValueError("indica 'packages' (instalar en un prefijo) o 'project_dir' (dependencias del proyecto)")
         check_all(spec.packages, _NPM_SPEC, what="paquete npm")
         if spec.project_dir:
-            d = existing_dir(spec.project_dir, self.config.roots(), what="project_dir")
+            d = existing_dir(spec.project_dir, self.config, what="project_dir")
             if not (d / "package.json").exists():
                 raise ValueError(f"{d} no tiene package.json")
         else:
             self.prefix(spec)
 
     def prefix(self, spec: NpmParams) -> Path:
-        return named_or_absolute_dir(spec.prefix, self.config.state_dir / "npm", self.config.roots(), what="prefix")
+        return named_or_absolute_dir(spec.prefix, self.config.state_dir / "npm", self.config, what="prefix")
 
     def _manager(self, d: Path, choice: str) -> str:
         if choice != "auto":
@@ -76,7 +80,7 @@ class NpmBackend(Backend[NpmParams]):
 
     def plan(self, spec: NpmParams) -> Plan:
         if spec.project_dir:
-            d = existing_dir(spec.project_dir, self.config.roots(), what="project_dir")
+            d = existing_dir(spec.project_dir, self.config, what="project_dir")
             mgr = self._manager(d, spec.manager)
             if mgr == "npm":
                 argv = ["npm", "ci" if (d / "package-lock.json").exists() else "install", "--no-fund", "--no-audit"]
@@ -105,7 +109,7 @@ class NpmBackend(Backend[NpmParams]):
 
     async def detect_versions(self, spec: NpmParams, probe: Probe) -> dict[str, str]:
         if spec.project_dir:
-            d = existing_dir(spec.project_dir, self.config.roots(), what="project_dir")
+            d = existing_dir(spec.project_dir, self.config, what="project_dir")
             res = await probe(["npm", "ls", "--json", "--depth=0"], timeout_s=60, cwd=str(d))
         else:
             res = await probe(["npm", "ls", "--json", "--depth=0", "--prefix", str(self.prefix(spec))], timeout_s=60)
@@ -146,7 +150,7 @@ class CargoBackend(Backend[CargoParams]):
         self.root(spec)
 
     def root(self, spec: CargoParams) -> Path:
-        return named_or_absolute_dir(spec.root, self.config.state_dir / "cargo", self.config.roots(), what="root")
+        return named_or_absolute_dir(spec.root, self.config.state_dir / "cargo", self.config, what="root")
 
     def plan(self, spec: CargoParams) -> Plan:
         root = self.root(spec)
@@ -191,7 +195,7 @@ class GoBackend(Backend[GoParams]):
         self.gobin(spec)
 
     def gobin(self, spec: GoParams) -> Path:
-        d = named_or_absolute_dir(spec.gobin, self.config.state_dir / "go", self.config.roots(), what="gobin")
+        d = named_or_absolute_dir(spec.gobin, self.config.state_dir / "go", self.config, what="gobin")
         return d / "bin" if spec.gobin == "default" or not Path(spec.gobin).is_absolute() else d
 
     def plan(self, spec: GoParams) -> Plan:

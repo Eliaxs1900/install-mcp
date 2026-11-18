@@ -22,8 +22,19 @@ max_wait_s = 300                  # tope duro de wait()
 memory_log_lines = 5000
 max_jobs_kept = 200
 
-# Dónde pueden escribir los backends (venvs por ruta, clones, descargas).
+# Dónde pueden escribir los backends (venvs por ruta, clones, descargas) y leer ficheros pedidos
+# (requirements, repos locales).
 allowed_roots = ["~"]
+# Zonas protegidas DENTRO de las raíces: rutas con algún componente oculto (~/.zshrc, ~/.ssh,
+# proyecto/.git/hooks...) y estos directorios de primer nivel de HOME. Para usar una a propósito,
+# añádela como raíz explícita, p. ej. allowed_roots = ["~", "~/.local/bin"].
+protect_dot_paths = true
+protected_home_dirs = ["Library"]
+
+# Tope duro de cualquier job, aunque se pida "sin límite" (job_timeout_s = 0).
+max_job_timeout_s = 86400
+# Al cancelar un paso interno (descarga en un hilo): espera a que suelte su hilo antes de liberar el lock.
+func_cancel_grace_s = 75
 
 # Regex extra a redactar en los logs.
 redact_patterns = []
@@ -44,13 +55,19 @@ prefer_uv = true
 # ca_bundle = "/ruta/ca.pem"        # CA propia (proxy corporativo)
 # max_bytes = 5368709120            # 5 GiB
 # read_timeout_s = 60
+# max_extract_bytes = 21474836480   # 20 GiB: tope de lo extraído (bombas de descompresión)
+# max_extract_files = 100000
 
 [backends.binary]
-# bin_dir = "~/.local/bin"          # por defecto <state_dir>/bin
+# bin_dir = "~/.local/bin"          # por defecto <state_dir>/bin; ~/.local es zona protegida:
+#                                     añade "~/.local/bin" a allowed_roots para usarla
 
 [backends.run]
 # Programas que `run` puede ejecutar (además hay que añadir "run" a allowed_backends).
 # programs = ["mvn", "pytest", "make"]
+# Variables de entorno que puede pasar la petición, además de las básicas (CI, LANG, TZ, NO_COLOR...).
+# Nunca se aceptan PATH, LD_*, DYLD_*... (inyectarían código en los programas permitidos).
+# env_allow = ["MI_VARIABLE"]
 
 # [backends.apt]                    # requiere allow_privileged = true y "apt" en allowed_backends
 # stall_timeout_s = 600

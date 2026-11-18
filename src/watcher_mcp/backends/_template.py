@@ -42,7 +42,7 @@ class MiBackend(Backend[MiParams]):
         self.dest(spec)                                   # valida la ruta contra allowed_roots
 
     def dest(self, spec: MiParams):  # noqa: ANN201
-        return named_or_absolute_dir(spec.dest, self.config.state_dir / "mi", self.config.roots(), what="dest")
+        return named_or_absolute_dir(spec.dest, self.config.state_dir / "mi", self.config, what="dest")
 
     def plan(self, spec: MiParams) -> Plan:
         d = self.dest(spec)

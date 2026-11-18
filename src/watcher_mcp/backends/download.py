@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import os
 import re
+import secrets
 import shutil
 import ssl
 import stat
@@ -31,11 +32,15 @@ from urllib.parse import unquote, urlsplit
 
 from pydantic import Field
 
-from ..security import Checksum, ensure_within_roots, require_https, url_secrets
+from ..security import Checksum, require_https, url_secrets
 from .base import Backend, FuncStep, Plan, Probe, StepContext
 from .common import LimitParams
 
 CHUNK = 256 * 1024
+# Límites de extracción por defecto ([backends.download] max_extract_bytes / max_extract_files):
+# un archivo pequeño puede expandirse hasta llenar el disco (bomba de descompresión).
+MAX_EXTRACT_BYTES = 20 << 30
+MAX_EXTRACT_FILES = 100_000
 ARCHIVES = (".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tbz2", ".tar", ".zip")
 _FILENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,200}$")
 
@@ -119,11 +124,75 @@ def _safe_target(root: Path, rel: str) -> Path:
     return target
 
 
-def extract(archive: Path, dest: Path, *, strip_components: int = 0, member: str | None = None, log: Any) -> list[Path]:
-    """Extrae ``archive`` en ``dest`` de forma segura. Con ``member`` extrae solo ese fichero."""
+class _Budget:
+    """Cuenta bytes y ficheros extraídos y corta al superar los límites."""
+
+    def __init__(self, max_bytes: int, max_files: int, cancelled: Any) -> None:
+        self.max_bytes, self.max_files, self.cancelled = max_bytes, max_files, cancelled
+        self.bytes = 0
+        self.files = 0
+
+    def new_file(self) -> None:
+        self.files += 1
+        if self.max_files and self.files > self.max_files:
+            raise ValueError(f"el archivo tiene más de {self.max_files} ficheros (max_extract_files)")
+
+    def copy(self, src: Any, dst: Any) -> None:
+        while True:
+            if self.cancelled():
+                raise DownloadCancelled()
+            chunk = src.read(CHUNK)
+            if not chunk:
+                return
+            self.bytes += len(chunk)
+            if self.max_bytes and self.bytes > self.max_bytes:
+                raise ValueError(f"lo extraído supera {_human(self.max_bytes)} (max_extract_bytes): ¿bomba de descompresión?")
+            dst.write(chunk)
+
+
+def extract(
+    archive: Path,
+    dest: Path,
+    *,
+    strip_components: int = 0,
+    member: str | None = None,
+    log: Any,
+    overwrite: bool = True,
+    max_bytes: int = MAX_EXTRACT_BYTES,
+    max_files: int = MAX_EXTRACT_FILES,
+    cancelled: Any = lambda: False,
+) -> list[Path]:
+    """Extrae ``archive`` en ``dest`` de forma segura. Con ``member`` extrae solo ese fichero.
+
+    Límites de tamaño total y de número de ficheros; si se superan (o se cancela) se borran
+    los ficheros ya escritos. Con ``overwrite=False`` no se pisa ningún fichero existente.
+    """
     dest.mkdir(parents=True, exist_ok=True)
     root = dest.resolve()
     written: list[Path] = []
+    budget = _Budget(max_bytes, max_files, cancelled)
+    try:
+        _extract_into(archive, root, strip_components, member, overwrite, budget, written, log)
+    except BaseException:
+        for path in written:
+            path.unlink(missing_ok=True)
+        raise
+    if member and not written:
+        raise ValueError(f"el archivo no contiene {member!r}")
+    log(f"extraídos {len(written)} ficheros ({_human(budget.bytes)}) en {dest}")
+    return written
+
+
+def _claim(target: Path, overwrite: bool) -> None:
+    if not overwrite and target.exists():
+        raise ValueError(f"{target} ya existe (overwrite=false)")
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _extract_into(
+    archive: Path, root: Path, strip_components: int, member: str | None, overwrite: bool,
+    budget: _Budget, written: list[Path], log: Any,
+) -> None:
     name = archive.name.lower()
     if name.endswith(".zip"):
         with zipfile.ZipFile(archive) as zf:
@@ -132,13 +201,14 @@ def extract(archive: Path, dest: Path, *, strip_components: int = 0, member: str
                 if rel is None or info.is_dir() or (member and rel != member):
                     continue
                 target = _safe_target(root, rel)
-                target.parent.mkdir(parents=True, exist_ok=True)
+                budget.new_file()
+                _claim(target, overwrite)
+                written.append(target)
                 with zf.open(info) as src, open(target, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
+                    budget.copy(src, dst)
                 mode = (info.external_attr >> 16) & 0o777
                 if mode:
                     target.chmod(mode)
-                written.append(target)
     else:
         with tarfile.open(archive) as tf:
             for ti in tf.getmembers():
@@ -152,17 +222,14 @@ def extract(archive: Path, dest: Path, *, strip_components: int = 0, member: str
                 if ti.isdir():
                     target.mkdir(parents=True, exist_ok=True)
                     continue
-                target.parent.mkdir(parents=True, exist_ok=True)
+                budget.new_file()
+                _claim(target, overwrite)
+                written.append(target)
                 src = tf.extractfile(ti)
                 assert src is not None
                 with src, open(target, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
+                    budget.copy(src, dst)
                 target.chmod(ti.mode & 0o755 or 0o644)
-                written.append(target)
-    if member and not written:
-        raise ValueError(f"el archivo no contiene {member!r}")
-    log(f"extraídos {len(written)} ficheros en {dest}")
-    return written
 
 
 def _filename_from_url(url: str) -> str:
@@ -180,7 +247,9 @@ class DownloadParams(LimitParams):
     checksum: str | None = Field(None, description="'sha256:<hex>' (también sha384/sha512). Muy recomendado.")
     extract: bool = Field(False, description="Extraer tar.gz/tgz/tar.xz/tar.bz2/tar/zip en dest.")
     strip_components: int = Field(0, ge=0, le=10, description="Como tar --strip-components.")
-    overwrite: bool = Field(True, description="Sustituir el destino si ya existe.")
+    overwrite: bool = Field(
+        False, description="Sustituir el destino (o los ficheros extraídos) si ya existen. Por defecto no se pisa nada."
+    )
 
 
 class DownloadBackend(Backend[DownloadParams]):
@@ -192,14 +261,14 @@ class DownloadBackend(Backend[DownloadParams]):
     # --- validación ---------------------------------------------------------------
     def check(self, spec: DownloadParams) -> None:
         require_https(spec.url, what="url")
-        ensure_within_roots(spec.dest, self.config.roots(), what="dest")
+        self.config.safe_path(spec.dest, what="dest")
         if spec.checksum:
             Checksum.parse(spec.checksum)
         if spec.extract and not spec.url.split("?")[0].lower().endswith(ARCHIVES):
             raise ValueError(f"extract=true necesita un archivo {', '.join(ARCHIVES)}")
 
     def target(self, spec: DownloadParams) -> Path:
-        dest = ensure_within_roots(spec.dest, self.config.roots(), what="dest")
+        dest = self.config.safe_path(spec.dest, what="dest")
         if spec.extract or spec.dest.endswith("/") or dest.is_dir():
             return dest / _filename_from_url(spec.url) if not spec.extract else dest
         return dest
@@ -243,7 +312,8 @@ class DownloadBackend(Backend[DownloadParams]):
     # --- plan ------------------------------------------------------------------------
     def plan(self, spec: DownloadParams) -> Plan:
         target = self.target(spec)
-        part = (target.parent if not spec.extract else target) / f".{_filename_from_url(spec.url)}.part"
+        # Nombre único por job: si un job cancelado aún no ha soltado su hilo, nunca borra el .part de otro.
+        part = (target.parent if not spec.extract else target) / f".{_filename_from_url(spec.url)}.{secrets.token_hex(4)}.part"
         holder: dict[str, Any] = {}
         steps = [self._fetch_step(spec.url, part, holder)]
         if spec.checksum:
@@ -255,7 +325,8 @@ class DownloadBackend(Backend[DownloadParams]):
                 part.replace(archive)
                 try:
                     await asyncio.to_thread(
-                        extract, archive, target, strip_components=spec.strip_components, log=ctx.log
+                        extract, archive, target, strip_components=spec.strip_components, log=ctx.log,
+                        overwrite=spec.overwrite, cancelled=ctx.cancelled, **self._extract_limits(),
                     )
                 finally:
                     archive.unlink(missing_ok=True)
@@ -274,6 +345,12 @@ class DownloadBackend(Backend[DownloadParams]):
             secrets=url_secrets(spec.url) + _query_secrets(spec.url),
             **spec.limits(),
         )
+
+    def _extract_limits(self) -> dict[str, int]:
+        return {
+            "max_bytes": int(self.options.get("max_extract_bytes", MAX_EXTRACT_BYTES)),
+            "max_files": int(self.options.get("max_extract_files", MAX_EXTRACT_FILES)),
+        }
 
     async def detect_versions(self, spec: DownloadParams, probe: Probe) -> dict[str, str]:
         target = self.target(spec)
@@ -316,6 +393,7 @@ class BinaryParams(LimitParams):
         None, description="Directorio destino absoluto; por defecto [backends.binary] bin_dir o <state_dir>/bin."
     )
     version_args: list[str] = Field(default_factory=lambda: ["--version"], max_length=4)
+    overwrite: bool = Field(False, description="Sustituir el ejecutable si ya existe en bin_dir.")
 
 
 class BinaryBackend(DownloadBackend):
@@ -330,7 +408,7 @@ class BinaryBackend(DownloadBackend):
 
     def bin_dir(self, spec: BinaryParams) -> Path:  # type: ignore[override]
         raw = spec.bin_dir or self.options.get("bin_dir") or str(self.config.state_dir / "bin")
-        return ensure_within_roots(os.path.expanduser(raw), self.config.roots(), what="bin_dir")
+        return self.config.safe_path(os.path.expanduser(raw), what="bin_dir")
 
     def check(self, spec: BinaryParams) -> None:  # type: ignore[override]
         require_https(spec.url, what="url")
@@ -349,17 +427,23 @@ class BinaryBackend(DownloadBackend):
     def plan(self, spec: BinaryParams) -> Plan:  # type: ignore[override]
         bin_dir = self.bin_dir(spec)
         target = bin_dir / spec.name
-        part = bin_dir / f".{spec.name}.download.part"
+        part = bin_dir / f".{spec.name}.{secrets.token_hex(4)}.download.part"
         holder: dict[str, Any] = {}
         steps = [self._fetch_step(spec.url, part, holder), self._verify_step(spec.checksum, part, holder)]
 
         async def install(ctx: StepContext) -> None:
+            if target.exists() and not spec.overwrite:
+                part.unlink(missing_ok=True)
+                raise ValueError(f"{target} ya existe (overwrite=false)")
             if spec.member:
                 tmp = bin_dir / f".{spec.name}.extract"
                 archive = tmp.with_name(f".{spec.name}" + _archive_suffix(spec.url))
                 part.replace(archive)
                 try:
-                    files = await asyncio.to_thread(extract, archive, tmp, member=spec.member, log=ctx.log)
+                    files = await asyncio.to_thread(
+                        extract, archive, tmp, member=spec.member, log=ctx.log, cancelled=ctx.cancelled,
+                        **self._extract_limits(),
+                    )
                     files[0].replace(target)
                 finally:
                     archive.unlink(missing_ok=True)
