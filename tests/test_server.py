@@ -48,7 +48,8 @@ async def test_end_to_end_install_wait_and_notify(config, registry):
     async with Client(mcp, mode="legacy", logging_callback=rec.on_log, message_handler=rec.on_message) as client:
         res = data(await client.call_tool("install", {"backend": "fake", "params": {"lines": 15, "interval": 0.1}}))
         job_id = res["job_id"]
-        assert res["state"] == "queued" and res["uri"] == f"job://{job_id}"
+        # Según la planificación del bucle puede haber arrancado ya al responder.
+        assert res["state"] in ("queued", "running") and res["uri"] == f"job://{job_id}"
         await client.subscribe_resource(f"job://{job_id}")
 
         # Logs en vivo mientras corre.

@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
+import os
 import re
 import secrets
 import shutil
@@ -436,6 +438,9 @@ class JobManager:
         registrar qué conexión es la dueña del job y avisarla desde ``queued``).
         """
         backend = self.backend(backend_name)
+        available, why = backend.availability()
+        if not available:
+            raise JobError(f"Backend {backend_name!r} no disponible en esta máquina: {why}")
         try:
             spec = backend.validate(params)
         except ValueError as exc:  # incluye pydantic.ValidationError
@@ -523,10 +528,12 @@ class JobManager:
         return "cancelled" if job.cancel_event.is_set() else "timeout"
 
     def _probe(self, job: Job) -> Callable[..., Awaitable[ProbeResult]]:
-        async def probe(argv: list[str], env: Mapping[str, str] | None = None, timeout_s: float = 60) -> ProbeResult:
+        async def probe(
+            argv: list[str], env: Mapping[str, str] | None = None, timeout_s: float = 60, cwd: str | None = None
+        ) -> ProbeResult:
             job.add_line("core", "$ " + " ".join(job.redact.argv(argv)) + "   (sonda de versión)")
             try:
-                code, out, err = await run_capture(argv, env=build_env(env or {}), timeout_s=timeout_s)
+                code, out, err = await run_capture(argv, env=build_env(env or {}), cwd=cwd, timeout_s=timeout_s)
             except OSError as exc:
                 job.add_line("core", f"sonda fallida: {exc}")
                 return ProbeResult(-1, "", str(exc))
@@ -571,7 +578,7 @@ class JobManager:
     async def _run_command(self, job: Job, rec: StepRecord, step: CommandStep) -> str:
         """Devuelve 'ok' | 'failed' | 'cancelled' | 'timed_out'."""
         argv = list(step.argv)
-        if step.privileged:
+        if step.privileged and not (hasattr(os, "geteuid") and os.geteuid() == 0):
             argv = [*self.config.privilege_command, *argv]
         exe = shutil.which(argv[0]) if not Path(argv[0]).is_absolute() else argv[0]
         if not exe:
@@ -619,7 +626,12 @@ class JobManager:
         return "ok"
 
     async def _run_func(self, job: Job, step: FuncStep) -> str:
-        ctx = StepContext(log=lambda m: job.add_line("core", m, activity=True), cancelled=job.cancel_event.is_set)
+        loop = asyncio.get_running_loop()
+
+        def log(message: str) -> None:  # seguro también desde hilos (descargas en to_thread)
+            loop.call_soon_threadsafe(functools.partial(job.add_line, "core", message, activity=True))
+
+        ctx = StepContext(log=log, cancelled=job.cancel_event.is_set)
         task = asyncio.create_task(step.func(ctx))
         cancel = asyncio.create_task(job.cancel_event.wait())
         try:

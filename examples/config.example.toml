@@ -3,8 +3,8 @@
 # Jobs, logs y venvs con nombre.
 # state_dir = "~/.local/state/install-mcp"
 
-# Solo estos backends se pueden usar.
-allowed_backends = ["pip"]
+# Solo estos backends se pueden usar. Por defecto, todos menos apt (root) y run.
+allowed_backends = ["pip", "git", "download", "binary", "npm", "cargo", "go", "maven", "gradle", "brew", "docker"]
 
 # Backends que necesitan root (apt-get...) se rechazan salvo que esto sea true.
 allow_privileged = false
@@ -39,3 +39,18 @@ prefer_uv = true
 # io_mode = "pipe"
 # uv_path = "/opt/homebrew/bin/uv"
 # base_python = "/usr/bin/python3"   # para python -m venv cuando no hay uv
+
+[backends.download]
+# ca_bundle = "/ruta/ca.pem"        # CA propia (proxy corporativo)
+# max_bytes = 5368709120            # 5 GiB
+# read_timeout_s = 60
+
+[backends.binary]
+# bin_dir = "~/.local/bin"          # por defecto <state_dir>/bin
+
+[backends.run]
+# Programas que `run` puede ejecutar (además hay que añadir "run" a allowed_backends).
+# programs = ["mvn", "pytest", "make"]
+
+# [backends.apt]                    # requiere allow_privileged = true y "apt" en allowed_backends
+# stall_timeout_s = 600

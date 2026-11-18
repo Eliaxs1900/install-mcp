@@ -42,7 +42,8 @@ instalador es un **backend** que solo traduce parámetros a comandos.
  └──────────────────────┬──────────────────────────────────────────────┘
                         │ validate → plan → (ejecuta pasos) → detect_versions
  ┌──────────────────────▼──────────────────────────────────────────────┐
- │  backends/  pip (implementado) · _template (git, ejemplo) · …        │
+ │  backends/  pip · git · download · binary · npm · cargo · go ·       │
+ │             maven · gradle · brew · apt · docker · run              │
  └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -213,7 +214,7 @@ Notas:
 
 | Tool | Bloquea | Devuelve |
 |---|---|---|
-| `backends()` | no | Backends registrados, si están permitidos/disponibles y el JSON Schema de sus `params` |
+| `backends()` | no | Backends registrados, si están permitidos/disponibles, sus límites y el JSON Schema de sus `params` |
 | `install(backend, params, wait_s=0)` | no (o hasta `wait_s`) | `job_id`, `state`, `summary`, `uri`, `log_file` |
 | `status(job_id, tail=10)` | no | Estado completo (con `pid`, `command`, `silent_for_s`, `limits`) + informe si terminó |
 | `list_jobs(state?, limit=20)` | no | Resumen de jobs recientes |
@@ -253,20 +254,35 @@ class Backend(ABC, Generic[P]):
 `probe(argv, env=None, timeout_s=60) -> ProbeResult(exit_code, stdout, stderr)` es la
 única forma de que un backend ejecute algo por su cuenta, y queda registrada en el log.
 
-### Backends previstos
+### Backends implementados
 
-| Backend | Params principales | Pasos (argv) | Versión instalada | Privilegios | `lock_key` |
-|---|---|---|---|---|---|
-| **pip** ✅ | `packages`, `requirements`, `venv`, `python`, `installer`, `index_url`, `find_links`, `no_index`, `upgrade`, `job_timeout_s`, `stall_timeout_s` | `uv venv` / `python -m venv`; `uv pip install --python …` / `python -m pip install --progress-bar off … -- <reqs>` | `importlib.metadata` con el python del venv | no | `venv:<ruta>` |
-| **git** (plantilla en `backends/_template.py`) | `url` (https), `dest`, `ref`, `depth` | `git clone --progress --depth N --branch REF -- URL DEST` o `git -C DEST pull --ff-only`; `GIT_TERMINAL_PROMPT=0` | `git rev-parse --short HEAD` | no | `path:<dest>` |
-| **apt** | `packages` (`^[a-z0-9][a-z0-9+.-]*(=[\w.:~+-]+)?$`), `update` | `apt-get update`; `apt-get install -y --no-install-recommends -- pkgs`, `DEBIAN_FRONTEND=noninteractive`, `privileged=True` | `dpkg-query -W -f '${Package} ${Version}\n' pkgs` | **sí** | `apt` (lock global de dpkg) |
-| **download** (wget/curl) | `url` (https), `dest`, `checksum` (`sha256:…`), `extract` | `curl -fL --proto =https --retry 3 -o tmp URL` (o `wget`); `FuncStep` verifica `Checksum` y mueve al destino; `FuncStep` extrae (tar/zip) comprobando *path traversal* | checksum/tamaño del fichero | no | `path:<dest>` |
-| **brew** | `formulae`, `casks` | `brew install -- …`, `HOMEBREW_NO_AUTO_UPDATE=1`, `HOMEBREW_NO_ENV_HINTS=1` | `brew list --versions …` | no (brew se niega a correr como root) | `brew` |
-| **npm** | `packages`, `prefix` (dir dentro de las raíces) | `npm install --prefix DIR --no-fund --no-audit -- pkgs` | `npm ls --json --prefix DIR` | no | `npm:<prefix>` |
-| **cargo** | `crates`, `root`, `version`, `locked` | `cargo install --root DIR [--locked] -- crate` | `cargo install --list --root DIR` | no | `cargo:<root>` |
-| **maven** | `artifacts` (`g:a:v`), `repo_url` (https) | `mvn -B -ntp dependency:get -Dartifact=g:a:v` | ruta en `~/.m2` | no | `maven` |
-| **binary** | `url`, `checksum` (**obligatorio**), `dest`, `name` | como *download* + `chmod 0755` en `FuncStep` | `<bin> --version` (opcional) | no | `path:<dest>` |
-| **wsl** | `distro`, `backend`, `params` | delega en otro backend anteponiendo `wsl.exe -d DISTRO --` al argv | la del backend delegado | según el delegado | `wsl:<distro>:<lock delegado>` |
+Agrupados por los focos de interacción habituales de un agente de código:
+
+| Foco | Backend | Params principales | Comando(s) | Versión instalada | Priv. | `lock_key` |
+|---|---|---|---|---|---|---|
+| Web | **download** | `url` (https), `dest`, `checksum`, `extract`, `strip_components` | descarga en Python (hilo): solo https también tras redirecciones, progreso cada 2 s, tamaño máximo, `.part` + renombrado atómico; extracción tar/zip sin `..`, rutas absolutas ni enlaces | tamaño + sha256 (o nº de ficheros extraídos) | no | `path:<dest>` |
+| Web | **binary** | `url`, `checksum` (**obligatorio**), `name`, `member`, `bin_dir` | como *download* + extrae `member` de un tar/zip + `chmod +x` | `<bin> --version` | no | `path:<bin>` |
+| Código | **pip** | `packages`, `requirements`, `venv`, `python`, `installer`, `index_url`, `find_links`, `no_index`, `upgrade` | `uv venv` / `python -m venv`; `uv pip install` / `pip install --progress-bar off … -- <reqs>` | `importlib.metadata` en el venv | no | `venv:<ruta>` |
+| Código | **git** | `url` (https, ssh, `git@host:…`, ruta local), `dest`, `ref`, `depth`, `submodules`, `update` | `git clone --progress … -- URL DEST` o `fetch` + `checkout` + `merge --ff-only`; `GIT_TERMINAL_PROMPT=0`, `ssh -o BatchMode=yes` | `git describe` + HEAD | no | `path:<dest>` |
+| Código | **npm** | `packages` + `prefix`, o `project_dir` (+ `manager` auto/npm/pnpm/yarn), `ignore_scripts` | `npm install --prefix DIR --no-save -- pkgs`; proyecto: `npm ci` / `pnpm install --frozen-lockfile` / `yarn install --frozen-lockfile` | `npm ls --json --depth=0` | no | `path:<prefix>` |
+| Código | **cargo** | `crates` (`name[@ver]`), `root`, `locked` | `cargo install --root DIR --locked -- crate` (un paso por crate) | `cargo install --list` | no | `path:<root>` |
+| Código | **go** | `packages` (`ruta@versión`), `gobin` | `go install -v -- pkg@ver` con `GOBIN` | `go version -m GOBIN` | no | `path:<gobin>` |
+| Código | **maven** | `artifacts` (`g:a:v`), o `project_dir` + `goals` (allowlist), `skip_tests`, `offline`, `profiles`, `properties`, `use_wrapper` | `mvn -B -ntp dependency:get -Dartifact=…`; proyecto: `mvnw`/`mvn -B -ntp -f pom.xml <goals>` | `~/.m2` / pom + `target/*.jar` | no | `maven:repo` / `path:<proyecto>` |
+| Código | **gradle** | `project_dir`, `tasks` (allowlist, admite `:mod:tarea`), `exclude_test`, `offline`, `use_wrapper` | `gradlew`/`gradle --console=plain --no-daemon -p DIR <tasks>` | `build/libs/*.jar` | no | `path:<proyecto>` |
+| Sistema | **brew** | `formulae`, `casks`, `upgrade` | `brew install --formula -- …` / `--cask`; sin auto-update ni prompts | `brew list --versions` | no (no admite root) | `brew` |
+| Sistema | **apt** | `packages` (`nombre[=versión]`), `update`, `install_recommends` | `apt-get -y -q -o Dpkg::Lock::Timeout=120 update/install`, `DEBIAN_FRONTEND=noninteractive`; `sudo -n` si no es root | `dpkg-query -W` | **sí** | `apt` |
+| Sistema | **docker** | `images`, `platform` | `docker pull [--platform P] -- img` | id de la imagen | no | `docker` |
+| Comandos | **run** | `program` (allowlist `[backends.run] programs`), `args`, `cwd`, `env`, `io_mode`, `ok_exit_codes` | el programa con sus argumentos, sin shell | `<program> --version` | no | — |
+
+Todos aceptan además `job_timeout_s` y `stall_timeout_s`.
+
+**Allowlist por defecto**: todos menos `apt` (necesita root) y `run` (ejecuta programas
+arbitrarios de una lista que hay que configurar). `backends()` informa de si cada uno
+está disponible en la máquina; si falta el ejecutable, `install` lo rechaza al instante.
+
+**Pendiente**: `wsl` (delegar en un backend dentro de una distro con `wsl.exe -d DISTRO --`).
+Las rutas dentro de la distro no encajan con el modelo de raíces permitidas del host, así
+que necesita su propio diseño de rutas.
 
 Modo de E/S recomendado: `pipe` para pip, git, npm, cargo, curl/wget (escriben sin
 buffer o en stderr); `pty` para apt-get/dpkg y herramientas C (binwalk, unsquashfs, 7z)

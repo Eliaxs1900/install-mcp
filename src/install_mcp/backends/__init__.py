@@ -11,9 +11,20 @@ import importlib
 from typing import Any
 
 from .base import Backend, BackendParams, CommandStep, FuncStep, Plan, ProbeResult, StepContext
+from .download import BinaryBackend, DownloadBackend
+from .ecosystems import CargoBackend, GoBackend, NpmBackend
+from .git import GitBackend
+from .jvm import GradleBackend, MavenBackend
 from .pip import PipBackend
+from .system import AptBackend, BrewBackend, DockerBackend, RunBackend
 
-BUILTIN: dict[str, type[Backend[Any]]] = {PipBackend.name: PipBackend}
+BUILTIN: dict[str, type[Backend[Any]]] = {
+    b.name: b
+    for b in (
+        PipBackend, GitBackend, DownloadBackend, BinaryBackend, NpmBackend, CargoBackend, GoBackend,
+        MavenBackend, GradleBackend, BrewBackend, AptBackend, DockerBackend, RunBackend,
+    )
+}
 
 
 def load_registry(plugins: list[str] | None = None) -> dict[str, type[Backend[Any]]]:
