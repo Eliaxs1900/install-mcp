@@ -6,10 +6,15 @@ import asyncio
 from typing import Any
 
 import mcp_types as types
+import pytest
 from mcp import Client
 
 from watcher_mcp.notify import McpNotifier
 from watcher_mcp.server import create_server
+
+
+# E2E: herramientas y servicios reales. Las pruebas puntuales se ejecutan con -m 'not e2e'.
+pytestmark = pytest.mark.e2e
 
 
 def data(result: types.CallToolResult) -> Any:

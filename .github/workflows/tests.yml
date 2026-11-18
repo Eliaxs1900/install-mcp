@@ -5,8 +5,33 @@ on:
     branches: [main]
   pull_request:
 
+# Pruebas selectivas: en un PR solo se ejecuta lo que toca el cambio (scripts/select_tests.py);
+# en main, siempre todo como red de seguridad. Dos niveles:
+# - puntuales: validación, planes y núcleo con backends falsos (rápidas) -> matriz completa;
+# - e2e (marcador e2e): pip/uv, git, HTTPS local, cliente MCP -> en PR, un Python por SO.
+
 jobs:
-  pytest:
+  select:
+    runs-on: ubuntu-latest
+    outputs:
+      puntuales: ${{ steps.sel.outputs.puntuales }}
+      e2e: ${{ steps.sel.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: sel
+        name: Elegir pruebas
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            python3 scripts/select_tests.py --tiers --base "${{ github.event.pull_request.base.sha }}" | tee -a "$GITHUB_OUTPUT"
+          else
+            printf 'puntuales=ALL\ne2e=ALL\n' | tee -a "$GITHUB_OUTPUT"
+          fi
+
+  puntuales:
+    needs: select
+    if: needs.select.outputs.puntuales != 'NONE'
     strategy:
       fail-fast: false
       matrix:
@@ -20,5 +45,32 @@ jobs:
         run: |
           uv venv --python ${{ matrix.python }} .venv
           uv pip install --python .venv/bin/python -e ".[dev]"
-      - name: Tests (incluye instalaciones reales offline con pip y uv)
-        run: .venv/bin/python -m pytest -q
+      - name: Pruebas puntuales (${{ needs.select.outputs.puntuales }})
+        env:
+          TESTS: ${{ needs.select.outputs.puntuales }}
+        run: |
+          if [ "$TESTS" = "ALL" ]; then set --; else set -- $TESTS; fi
+          .venv/bin/python -m pytest -q -m "not e2e" "$@"
+
+  e2e:
+    needs: select
+    if: needs.select.outputs.e2e != 'NONE'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ${{ github.event_name == 'push' && fromJSON('["3.11", "3.12", "3.13"]') || fromJSON('["3.12"]') }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Instalar
+        run: |
+          uv venv --python ${{ matrix.python }} .venv
+          uv pip install --python .venv/bin/python -e ".[dev]"
+      - name: Pruebas E2E, incluye instalaciones reales offline con pip y uv (${{ needs.select.outputs.e2e }})
+        env:
+          TESTS: ${{ needs.select.outputs.e2e }}
+        run: |
+          if [ "$TESTS" = "ALL" ]; then set --; else set -- $TESTS; fi
+          .venv/bin/python -m pytest -q -m "e2e" "$@"

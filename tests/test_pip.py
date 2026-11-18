@@ -13,6 +13,10 @@ from watcher_mcp.jobs import JobError, JobManager, JobState
 from .conftest import build_wheel
 
 
+# E2E: herramientas y servicios reales. Las pruebas puntuales se ejecutan con -m 'not e2e'.
+pytestmark = pytest.mark.e2e
+
+
 @pytest.fixture
 def pip(config) -> PipBackend:
     return PipBackend(config)
