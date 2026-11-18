@@ -1,0 +1,41 @@
+# Copia a ~/.config/install-mcp/config.toml o pásalo con --config / $INSTALL_MCP_CONFIG.
+
+# Jobs, logs y venvs con nombre.
+# state_dir = "~/.local/state/install-mcp"
+
+# Solo estos backends se pueden usar.
+allowed_backends = ["pip"]
+
+# Backends que necesitan root (apt-get...) se rechazan salvo que esto sea true.
+allow_privileged = false
+# Prefijo para pasos privilegiados; -n = nunca pedir contraseña (falla en vez de colgarse).
+privilege_command = ["sudo", "-n"]
+
+max_parallel = 4
+default_job_timeout_s = 3600      # al vencer: SIGTERM, SIGKILL, estado timed_out
+default_stall_timeout_s = 300     # sin salida N s -> stalled + aviso (0 = desactivado)
+max_queue_s = 3600                # máximo en cola
+default_wait_s = 60               # wait() sin timeout
+listener_timeout_s = 5
+default_io_mode = "pipe"          # pipe | pty | stdbuf
+max_wait_s = 300                  # tope duro de wait()
+memory_log_lines = 5000
+max_jobs_kept = 200
+
+# Dónde pueden escribir los backends (venvs por ruta, clones, descargas).
+allowed_roots = ["~"]
+
+# Regex extra a redactar en los logs.
+redact_patterns = []
+
+# Backends externos: "paquete.modulo:Clase" (además hay que añadirlos a allowed_backends).
+plugins = []
+
+[backends.pip]
+prefer_uv = true
+# Límites propios del backend (la petición puede sobrescribirlos):
+# job_timeout_s = 1800
+# stall_timeout_s = 600
+# io_mode = "pipe"
+# uv_path = "/opt/homebrew/bin/uv"
+# base_python = "/usr/bin/python3"   # para python -m venv cuando no hay uv
