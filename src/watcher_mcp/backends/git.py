@@ -5,6 +5,9 @@
 * ``GIT_TERMINAL_PROMPT=0`` y ``ssh -o BatchMode=yes``: si hacen falta credenciales, falla
   enseguida en vez de colgarse esperando una entrada que nunca llegará.
 * ``--progress`` para que git escriba avance aunque su salida no sea un terminal.
+* La configuración local de un repo puede ejecutar código (``core.fsmonitor``, hooks,
+  ``credential.helper``, filtros): todos los comandos llevan ``-c`` que la neutraliza, y un
+  repo existente que watcher-mcp no clonó solo se actualiza con ``trust_existing=true``.
 """
 
 from __future__ import annotations
@@ -15,8 +18,8 @@ from typing import Any
 
 from pydantic import Field
 
-from ..security import ensure_within_roots, url_secrets
-from .base import Backend, CommandStep, Plan, Probe
+from ..security import url_secrets
+from .base import Backend, CommandStep, FuncStep, Plan, Probe, StepContext
 from .common import LimitParams
 
 _SCP = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[A-Za-z0-9._/~-]+$")
@@ -28,6 +31,10 @@ ENV = {
     "SSH_ASKPASS": "",
     "GCM_INTERACTIVE": "never",
 }
+# Neutraliza la configuración del repo que ejecuta programas (hooks, fsmonitor, helpers de credenciales).
+HARDENING = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper="]
+# Marca que deja watcher-mcp en los clones que hace él: solo esos se actualizan sin más.
+MARKER = "watcher-mcp-clone"
 
 
 class GitParams(LimitParams):
@@ -37,6 +44,11 @@ class GitParams(LimitParams):
     depth: int | None = Field(None, ge=1, description="Clon superficial con N commits.")
     submodules: bool = Field(False, description="Incluir submódulos (recursivo).")
     update: bool = Field(True, description="Si dest ya es un clon, hacer fetch + fast-forward.")
+    trust_existing: bool = Field(
+        False,
+        description="Permitir actualizar un repo existente que no clonó watcher-mcp (su configuración local "
+        "podría ejecutar código: solo si confías en él).",
+    )
 
 
 class GitBackend(Backend[GitParams]):
@@ -52,18 +64,25 @@ class GitBackend(Backend[GitParams]):
             or _SCP.match(u)
             or (Path(u).is_absolute() and Path(u).exists())
         )
+        if Path(u).is_absolute():
+            self.config.safe_path(u, what="url (ruta local)")
         if u.startswith("-") or "::" in u or not ok:
             raise ValueError(f"url de git no admitida: {u!r} (https, ssh, git@host:ruta o ruta local)")
-        dest = ensure_within_roots(spec.dest, self.config.roots(), what="dest")
+        dest = self.config.safe_path(spec.dest, what="dest")
         if dest.exists() and not (dest / ".git").exists() and any(dest.iterdir()):
             raise ValueError(f"dest existe, no está vacío y no es un repositorio git: {dest}")
+        if (dest / ".git").exists() and not (dest / ".git" / MARKER).exists() and not spec.trust_existing:
+            raise ValueError(
+                f"{dest} es un repositorio que watcher-mcp no clonó: su configuración local podría ejecutar "
+                "código al actualizarlo. Pasa trust_existing=true solo si confías en él."
+            )
         if spec.ref and (spec.ref.startswith("-") or not _REF.match(spec.ref) or ".." in spec.ref):
             raise ValueError(f"ref no válida: {spec.ref!r}")
 
     def plan(self, spec: GitParams) -> Plan:
-        dest = ensure_within_roots(spec.dest, self.config.roots(), what="dest")
+        dest = self.config.safe_path(spec.dest, what="dest")
         is_repo = (dest / ".git").exists()
-        git = ["git", "-c", "color.ui=never"]
+        git = ["git", "-c", "color.ui=never", *HARDENING]
         steps: list[CommandStep] = []
         if is_repo:
             if not spec.update and not spec.ref:
@@ -87,6 +106,7 @@ class GitBackend(Backend[GitParams]):
                 if spec.ref and not re.fullmatch(r"[0-9a-f]{7,40}", spec.ref):
                     clone += ["--branch", spec.ref]
             steps.append(CommandStep("clone", [*clone, "--", spec.url, str(dest)], env=ENV))
+            steps.append(FuncStep("mark", _mark(dest)))
             if spec.ref and (not spec.depth or re.fullmatch(r"[0-9a-f]{7,40}", spec.ref)):
                 steps.append(CommandStep("checkout", [*git, "-C", str(dest), "checkout", spec.ref, "--"], env=ENV))
             action = "clonar"
@@ -107,7 +127,7 @@ class GitBackend(Backend[GitParams]):
         )
 
     async def detect_versions(self, spec: GitParams, probe: Probe) -> dict[str, str]:
-        dest = ensure_within_roots(spec.dest, self.config.roots(), what="dest")
+        dest = self.config.safe_path(spec.dest, what="dest")
         res = await probe(["git", "-C", str(dest), "describe", "--always", "--tags", "--dirty"], timeout_s=20)
         head = await probe(["git", "-C", str(dest), "rev-parse", "--short", "HEAD"], timeout_s=20)
         if head.exit_code != 0:
@@ -115,7 +135,14 @@ class GitBackend(Backend[GitParams]):
         return {dest.name: f"{res.stdout.strip() or head.stdout.strip()} ({head.stdout.strip()})"}
 
     def result_info(self, spec: GitParams) -> dict[str, Any]:
-        return {"path": str(ensure_within_roots(spec.dest, self.config.roots(), what="dest"))}
+        return {"path": str(self.config.safe_path(spec.dest, what="dest"))}
+
+
+def _mark(dest: Path):  # type: ignore[no-untyped-def]
+    async def run(ctx: StepContext) -> None:
+        (dest / ".git" / MARKER).write_text("clonado por watcher-mcp\n", encoding="utf-8")
+
+    return run
 
 
 def _detached(dest: Path) -> bool:

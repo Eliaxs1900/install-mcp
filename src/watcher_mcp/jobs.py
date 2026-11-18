@@ -25,10 +25,13 @@ import asyncio
 import contextlib
 import functools
 import json
+import logging
 import os
 import re
 import secrets
 import shutil
+import signal
+import subprocess
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
@@ -42,6 +45,13 @@ from .backends.base import Backend, CommandStep, FuncStep, Plan, ProbeResult, St
 from .config import Config
 from .process import build_env, run_capture, run_command
 from .security import Redactor
+
+try:  # bloqueo entre procesos para saber qué instancias del servidor siguen vivas
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+
+log = logging.getLogger(__name__)
 
 
 class JobState(StrEnum):
@@ -148,8 +158,13 @@ class Job:
         redactor: Redactor,
         memory_lines: int,
         limits: Limits | None = None,
+        owner: str | None = None,
     ) -> None:
         self.id = job_id
+        # Instancia del servidor que lo ejecuta (cada sesión de Claude Code arranca la suya).
+        self.owner = owner
+        # True si se cargó del disco y sigue en curso en OTRA instancia viva: solo lectura.
+        self.foreign = False
         self.backend = backend
         self.params = params
         self.summary = plan.summary
@@ -223,8 +238,20 @@ class Job:
             or (not lines and self.log_path.exists())
         )
         if need_disk and self.log_path.exists():
+            # Recorrido en streaming quedándose solo con las últimas n que encajan: memoria O(n)
+            # aunque el log ocupe gigas (antes se cargaba el fichero entero en cada consulta).
+            selected: deque[LogLine] = deque(maxlen=max(n, 0))
             with open(self.log_path, encoding="utf-8", errors="replace") as fh:
-                lines = [LogLine.parse(i, raw) for i, raw in enumerate(fh, start=1)]
+                for i, raw in enumerate(fh, start=1):
+                    if since_seq is not None and i <= since_seq:
+                        continue
+                    if n <= 0:
+                        continue
+                    line = LogLine.parse(i, raw)
+                    if stream and stream != "all" and line.stream != stream:
+                        continue
+                    selected.append(line)
+            return list(selected)
         if since_seq is not None:
             lines = [ln for ln in lines if ln.seq > since_seq]
         if stream and stream != "all":
@@ -282,7 +309,11 @@ class Job:
             "log_lines": self._seq,
             "log_file": str(self.log_path),
             "params": self.params,
+            "owner": self.owner,
         }
+        if self.foreign:
+            d["foreign"] = True
+            d["note"] = "en curso en otra sesión del servidor (solo lectura desde aquí)"
         if self.state in ACTIVE:
             d.update(pid=self.pid, command=self.current_command, silent_for_s=self.silent_for())
         if self.installed:
@@ -299,12 +330,25 @@ class Job:
 
     @classmethod
     def from_disk(cls, directory: Path, redactor: Redactor, memory_lines: int) -> Job | None:
+        """Carga un job persistido tal cual. Nunca lanza: un job.json ilegible o de otra versión
+        se omite con un aviso en vez de impedir que arranque el servidor."""
+        try:
+            return cls._from_disk(directory, redactor, memory_lines)
+        except Exception as exc:
+            log.warning("job en %s omitido: no se pudo cargar (%r)", directory, exc)
+            return None
+
+    @classmethod
+    def _from_disk(cls, directory: Path, redactor: Redactor, memory_lines: int) -> Job | None:
         try:
             data = json.loads((directory / "job.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
         plan = Plan(summary=data.get("summary", ""), steps=[])
-        job = cls(data["job_id"], data["backend"], data.get("params", {}), plan, directory, redactor, memory_lines)
+        job = cls(data["job_id"], data["backend"], data.get("params", {}), plan, directory, redactor, memory_lines,
+                  owner=data.get("owner"))
+        job.pid = data.get("pid")
+        job.current_command = data.get("command")
         job.steps = [StepRecord(s["name"], s.get("state", "?"), s.get("exit_code")) for s in data.get("steps", [])]
         job.exit_code = data.get("exit_code")
         job.error = data.get("error")
@@ -321,17 +365,13 @@ class Job:
             job.state = JobState(data["state"])
         except ValueError:
             job.state = JobState.FAILED
-        if job.state not in TERMINAL:  # el servidor murió con el job en marcha
-            job.state = JobState.FAILED
-            job.error = "interrumpido: el servidor se reinició mientras el job estaba en curso"
-            job.finished_at = job.finished_at or time.time()
-            job.persist()
         if job.log_path.exists():
             with open(job.log_path, encoding="utf-8", errors="replace") as fh:
                 job._seq = sum(1 for _ in fh)
         with contextlib.suppress(OSError, ValueError):
             job.report = json.loads((directory / "report.json").read_text(encoding="utf-8"))
-        job.done.set()
+        if job.state in TERMINAL:
+            job.done.set()
         return job
 
 
@@ -350,6 +390,85 @@ class JobManager:
         self._locks: dict[str, asyncio.Lock] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._backends: dict[str, Backend[Any]] = {}
+        # Cada servidor (uno por sesión de Claude Code) comparte state_dir con los demás: se
+        # identifica con un id y un flock que mantiene mientras vive, para que los otros sepan
+        # si sus jobs siguen en curso o quedaron huérfanos.
+        self.instance_id = secrets.token_hex(4)
+        self._instance_fh: IO[str] | None = None
+        self._register_instance()
+
+    # --- instancias -----------------------------------------------------------
+    def _instance_lock(self, instance_id: str) -> Path:
+        return self.config.instances_dir / f"{instance_id}.lock"
+
+    def _register_instance(self) -> None:
+        if fcntl is None:
+            return
+        try:
+            self.config.instances_dir.mkdir(parents=True, exist_ok=True)
+            fh = open(self._instance_lock(self.instance_id), "w", encoding="utf-8")  # noqa: SIM115
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fh.write(f"{os.getpid()}\n")
+            fh.flush()
+            self._instance_fh = fh
+        except OSError as exc:
+            log.warning("no se pudo registrar la instancia en %s: %r", self.config.instances_dir, exc)
+
+    def _release_instance(self) -> None:
+        if self._instance_fh is not None:
+            with contextlib.suppress(OSError):
+                self._instance_lock(self.instance_id).unlink()
+                self._instance_fh.close()
+            self._instance_fh = None
+
+    def owner_alive(self, owner: str | None) -> bool:
+        """True si la instancia ``owner`` sigue viva (mantiene su flock)."""
+        if not owner or fcntl is None:
+            return False
+        if owner == self.instance_id:
+            return True
+        path = self._instance_lock(owner)
+        try:
+            with open(path, "a", encoding="utf-8") as fh:
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return True
+                fcntl.flock(fh, fcntl.LOCK_UN)
+        except OSError:
+            return False
+        with contextlib.suppress(OSError):
+            path.unlink()  # el dueño murió sin limpiar
+        return False
+
+    def _reap_orphan(self, job: Job) -> None:
+        """Termina el grupo de procesos de un job cuya instancia murió de golpe (kill -9, crash).
+
+        Los procesos arrancan en su propio grupo (start_new_session), así que no reciben SIGHUP
+        cuando muere el servidor y seguirían corriendo sin vigilancia. Antes de matar se
+        comprueba con ``ps`` que el pid sigue siendo el mismo programa (un pid se puede reutilizar).
+        """
+        pid, command = job.pid, job.current_command
+        if not pid or not command or not hasattr(os, "killpg"):
+            return
+        try:
+            out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return
+        program = Path(command[0]).name
+        if out.returncode != 0 or program not in out.stdout:
+            return  # ya no existe, o el pid es ahora de otro programa
+        job.add_line("core", f"proceso huérfano {pid} ({program}) de una instancia que murió: terminando su grupo")
+        for sig, grace in ((signal.SIGTERM, 3.0), (signal.SIGKILL, 2.0)):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(pid, sig)
+            deadline = time.monotonic() + grace
+            while time.monotonic() < deadline:
+                try:
+                    os.killpg(pid, 0)
+                except (ProcessLookupError, PermissionError):
+                    return
+                time.sleep(0.1)
 
     # --- backends -----------------------------------------------------------
     def backend(self, name: str) -> Backend[Any]:
@@ -391,7 +510,11 @@ class JobManager:
         io_mode = first(opts.get("io_mode"), backend.default_io_mode, self.config.default_io_mode)
         if io_mode not in ("pipe", "pty", "stdbuf"):
             raise JobError(f"io_mode no válido: {io_mode!r} (pipe | pty | stdbuf)")
-        return Limits(job_t or None, stall_t or None, io_mode)
+        job_t = job_t or None
+        cap = self.config.max_job_timeout_s or None
+        if cap:  # ninguna espera es infinita: "sin límite" (0) significa "hasta el tope duro"
+            job_t = min(job_t, cap) if job_t else cap
+        return Limits(job_t, stall_t or None, io_mode)
 
     # --- historial ------------------------------------------------------------
     def load_history(self) -> None:
@@ -402,10 +525,33 @@ class JobManager:
             if d.is_dir() and (job := Job.from_disk(d, self.redactor, self.config.memory_log_lines)):
                 found.append(job)
         for job in sorted(found, key=lambda j: j.created_at):
+            if job.state not in TERMINAL:
+                if job.owner and self.owner_alive(job.owner):
+                    job.foreign = True  # sigue en curso en otra sesión: no se toca
+                else:
+                    self._reap_orphan(job)
+                    job.state = JobState.FAILED
+                    job.error = "interrumpido: el servidor que lo ejecutaba terminó mientras estaba en curso"
+                    job.finished_at = job.finished_at or time.time()
+                    job.add_line("core", job.error)
+                    with contextlib.suppress(OSError):
+                        job.persist()
+                    job.done.set()
             self.jobs.setdefault(job.id, job)
 
     def _prune(self) -> None:
-        finished = [j for j in self.jobs.values() if j.state in TERMINAL]
+        alive: dict[str, bool] = {}
+
+        def prunable(j: Job) -> bool:
+            if j.foreign or j.state not in TERMINAL:
+                return False
+            if j.owner in (None, self.instance_id):
+                return True
+            if j.owner not in alive:
+                alive[j.owner] = self.owner_alive(j.owner)
+            return not alive[j.owner]  # nunca se borra la carpeta de un job de otra sesión viva
+
+        finished = [j for j in self.jobs.values() if prunable(j)]
         excess = len(finished) - self.config.max_jobs_kept
         for job in sorted(finished, key=lambda j: j.created_at)[: max(excess, 0)]:
             self.jobs.pop(job.id, None)
@@ -456,10 +602,10 @@ class JobManager:
         limits = self.limits(backend, plan)
         redactor = self.redactor.with_literals(plan.secrets)
         job_id = secrets.token_hex(6)
-        safe_params = json.loads(redactor(json.dumps(spec.model_dump(mode="json", exclude_none=True))))
+        safe_params = redactor.redact_obj(spec.model_dump(mode="json", exclude_none=True))
         job = Job(
             job_id, backend_name, safe_params, plan, self.config.jobs_dir / job_id, redactor,
-            self.config.memory_log_lines, limits,
+            self.config.memory_log_lines, limits, owner=self.instance_id,
         )
         job.open_log()
         job.add_line("core", f"job {job_id} creado: {job.summary}")
@@ -481,6 +627,8 @@ class JobManager:
 
     async def cancel(self, job_id: str) -> Job:
         job = self.get(job_id)
+        if job.foreign:
+            raise JobError(f"El job {job.id} se está ejecutando en otra sesión del servidor; cancélalo desde allí")
         if job.state not in TERMINAL:
             job.add_line("core", "cancelación solicitada")
             job.cancel_event.set()
@@ -492,10 +640,13 @@ class JobManager:
             if job.state not in TERMINAL:
                 job.cancel_event.set()
         tasks = [t for t in self._tasks.values() if not t.done()]
-        if tasks:
-            _, pending = await asyncio.wait(tasks, timeout=timeout_s)
-            for t in pending:
-                t.cancel()
+        try:
+            if tasks:
+                _, pending = await asyncio.wait(tasks, timeout=timeout_s)
+                for t in pending:
+                    t.cancel()
+        finally:
+            self._release_instance()
 
     # --- ejecución ------------------------------------------------------------------
     async def _emit(self, event: JobEvent) -> None:
@@ -593,6 +744,8 @@ class JobManager:
         def on_start(pid: int) -> None:
             job.pid = pid
             job.add_line("core", f"pid {pid}", activity=True)
+            with contextlib.suppress(OSError):
+                job.persist()  # pid y comando en disco: otra instancia podrá recoger el huérfano
 
         try:
             res = await run_command(
@@ -639,9 +792,15 @@ class JobManager:
         finally:
             cancel.cancel()
         if not task.done():  # cancelado o timeout global mientras corría
-            task.cancel()
+            # Un paso que trabaja en un hilo (descargas) no se detiene con task.cancel(): consulta
+            # ctx.cancelled entre bloques. Se espera a que termine de verdad (acotado), para no
+            # liberar su lock mientras el hilo sigue escribiendo y un reintento empieza en paralelo.
+            job.add_line("core", "esperando a que el paso se detenga…")
             with contextlib.suppress(asyncio.CancelledError, Exception):
-                await asyncio.wait_for(task, 5)
+                await asyncio.wait_for(asyncio.shield(task), self.config.func_cancel_grace_s)
+            if not task.done():
+                task.cancel()
+                job.add_line("core", f"el paso no se detuvo en {self.config.func_cancel_grace_s}s; se abandona")
             return "timed_out" if job.timed_out_reason else "cancelled"
         try:
             task.result()
@@ -742,24 +901,38 @@ class JobManager:
             await self._finish(job, backend, spec)
 
     async def _finish(self, job: Job, backend: Backend[Any], spec: Any) -> None:
-        job.finished_at = time.time()
-        if job.state == JobState.TIMED_OUT:
-            job.error = job.timed_out_reason or "tiempo agotado"
-        if job.state in (JobState.CANCELLED, JobState.TIMED_OUT):
-            for rec in job.steps:
-                if rec.state in ("pending", "running"):
-                    rec.state = "cancelled"
-        job.report = self._report(job, backend, spec)
-        job.add_line("core", f"job {job.state}: {job.report['headline']}")
-        with contextlib.suppress(OSError):
-            (job.dir / "report.json").write_text(json.dumps(job.report, ensure_ascii=False, indent=2), "utf-8")
-        job.persist()
-        job.close_log()
-        job.done.set()
-        self._tasks.pop(job.id, None)
+        """Cierra el job. Pase lo que pase (disco lleno, informe que falla...), ``done`` se activa:
+        si no, ``wait`` nunca lo vería terminar y el job quedaría "en curso" para siempre."""
+        try:
+            job.finished_at = time.time()
+            if job.state == JobState.TIMED_OUT:
+                job.error = job.timed_out_reason or "tiempo agotado"
+            if job.state in (JobState.CANCELLED, JobState.TIMED_OUT):
+                for rec in job.steps:
+                    if rec.state in ("pending", "running"):
+                        rec.state = "cancelled"
+            job.report = self._report(job, backend, spec)
+            job.add_line("core", f"job {job.state}: {job.report['headline']}")
+            with contextlib.suppress(OSError):
+                (job.dir / "report.json").write_text(json.dumps(job.report, ensure_ascii=False, indent=2), "utf-8")
+            job.persist()
+        except Exception as exc:
+            if job.state not in TERMINAL:
+                job.state = JobState.FAILED
+            job.error = job.error or f"error interno al cerrar el job: {exc!r}"
+            job.report = job.report or {"job_id": job.id, "state": str(job.state), "ok": False,
+                                        "headline": f"[{job.id}] {job.state} – {job.error}", "error": job.error}
+            with contextlib.suppress(Exception):
+                job.add_line("core", job.error)
+        finally:
+            with contextlib.suppress(Exception):
+                job.close_log()
+            job.done.set()
+            self._tasks.pop(job.id, None)
         level = {JobState.SUCCEEDED: "info", JobState.CANCELLED: "warning"}.get(job.state, "error")
         await self._emit(JobEvent("finished", job, level, job.report["headline"], {"report": job.report}))
-        self._prune()
+        with contextlib.suppress(Exception):
+            self._prune()
 
     def _report(self, job: Job, backend: Backend[Any], spec: Any) -> dict[str, Any]:
         ok = job.state == JobState.SUCCEEDED

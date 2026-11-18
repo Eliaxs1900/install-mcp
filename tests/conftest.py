@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -138,3 +139,11 @@ def build_wheel(directory: Path, name: str = "demo_pkg", version: str = "1.0.0")
         for path, content in files.items():
             zf.writestr(path, content)
     return wheel
+
+
+@pytest.fixture(autouse=True)
+def _isolated_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Los tests no heredan la configuración git del usuario (p. ej. commit.gpgsign=true con
+    firmas SSH hacía fallar test_git_clone_update_and_fail_fast en local)."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")

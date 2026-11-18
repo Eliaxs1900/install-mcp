@@ -18,10 +18,12 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import os
 import shutil
 import signal
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
@@ -58,6 +60,9 @@ def stdbuf_path() -> str | None:
 
 async def _pump(stream: asyncio.StreamReader, name: str, on_line: Callable[[str, str], None]) -> None:
     buf = ""
+    # Decodificador incremental: un carácter multibyte partido entre dos lecturas (á, ñ, emojis)
+    # se completa con la siguiente en vez de salir como "��".
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     while True:
         try:
             chunk = await stream.read(65536)
@@ -65,7 +70,7 @@ async def _pump(stream: asyncio.StreamReader, name: str, on_line: Callable[[str,
             break
         if not chunk:
             break
-        buf += chunk.decode("utf-8", errors="replace")
+        buf += decoder.decode(chunk)
         while True:
             idx = min((i for i in (buf.find("\n"), buf.find("\r")) if i != -1), default=-1)
             if idx == -1:
@@ -76,8 +81,21 @@ async def _pump(stream: asyncio.StreamReader, name: str, on_line: Callable[[str,
         if len(buf) > MAX_LINE:  # línea gigantesca sin salto: se emite troceada
             on_line(name, buf[:MAX_LINE])
             buf = buf[MAX_LINE:]
+    buf += decoder.decode(b"", final=True)
     if buf.strip():
         on_line(name, buf[:MAX_LINE])
+
+
+def _die_with_parent() -> None:  # pragma: no cover - solo Linux, en el hijo antes de exec
+    """Linux: el hijo recibe SIGKILL si muere el servidor (PR_SET_PDEATHSIG), aunque sea con
+    kill -9. En macOS no existe; ahí los huérfanos los recoge la siguiente instancia al arrancar."""
+    import ctypes
+
+    with contextlib.suppress(Exception):
+        ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGKILL)  # 1 = PR_SET_PDEATHSIG
+
+
+_PREEXEC = {"preexec_fn": _die_with_parent} if sys.platform.startswith("linux") else {}
 
 
 def _signal_group(pid: int, sig: int) -> None:
@@ -129,6 +147,7 @@ async def run_command(
             env=dict(env),
             cwd=cwd,
             start_new_session=True,
+            **_PREEXEC,
         )
     except BaseException:
         if master is not None:

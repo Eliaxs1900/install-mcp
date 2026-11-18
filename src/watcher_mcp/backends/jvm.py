@@ -76,7 +76,7 @@ class MavenBackend(Backend[MavenParams]):
         if bad:
             raise ValueError(f"objetivos no permitidos: {bad}; permitidos: {list(MAVEN_GOALS)}")
         if spec.project_dir:
-            d = existing_dir(spec.project_dir, self.config.roots(), what="project_dir")
+            d = existing_dir(spec.project_dir, self.config, what="project_dir")
             if not (d / "pom.xml").exists():
                 raise ValueError(f"{d} no tiene pom.xml")
         self._mvn(spec)
@@ -103,7 +103,7 @@ class MavenBackend(Backend[MavenParams]):
             ]
             return Plan(summary=f"maven: descargar {', '.join(spec.artifacts)}", steps=steps,
                         lock_key="maven:repo", **spec.limits())
-        d = existing_dir(spec.project_dir or "", self.config.roots(), what="project_dir")
+        d = existing_dir(spec.project_dir or "", self.config, what="project_dir")
         argv = [*base, "-f", str(d / "pom.xml")]
         if spec.skip_tests:
             argv.append("-DskipTests")
@@ -163,7 +163,7 @@ class GradleBackend(Backend[GradleParams]):
         return True, "ok (gradle en PATH o gradlew en el proyecto)"
 
     def check(self, spec: GradleParams) -> None:
-        d = existing_dir(spec.project_dir, self.config.roots(), what="project_dir")
+        d = existing_dir(spec.project_dir, self.config, what="project_dir")
         if not any((d / f).exists() for f in ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts")):
             raise ValueError(f"{d} no parece un proyecto Gradle")
         for t in spec.tasks:
@@ -181,7 +181,7 @@ class GradleBackend(Backend[GradleParams]):
         return g
 
     def plan(self, spec: GradleParams) -> Plan:
-        d = existing_dir(spec.project_dir, self.config.roots(), what="project_dir")
+        d = existing_dir(spec.project_dir, self.config, what="project_dir")
         argv = [self._gradle(spec), "--console=plain", "--no-daemon", "-p", str(d)]
         if spec.offline:
             argv.append("--offline")

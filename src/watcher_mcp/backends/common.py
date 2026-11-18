@@ -7,12 +7,14 @@ import re
 import shutil
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 
-from ..security import ensure_within_roots
 from .base import BackendParams
+
+if TYPE_CHECKING:
+    from ..config import Config
 
 NAME_DIR = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -35,15 +37,15 @@ def is_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
-def named_or_absolute_dir(value: str, base: Path, roots: Iterable[Path], *, what: str) -> Path:
-    """``"nombre"`` -> ``base/nombre``; ruta absoluta -> debe caer dentro de las raíces permitidas."""
+def named_or_absolute_dir(value: str, base: Path, config: Config, *, what: str) -> Path:
+    """``"nombre"`` -> ``base/nombre``; ruta absoluta -> dentro de las raíces y fuera de zonas protegidas."""
     if NAME_DIR.match(value):
         return (base / value).expanduser().resolve()
-    return ensure_within_roots(value, roots, what=what)
+    return config.safe_path(value, what=what)
 
 
-def existing_dir(value: str, roots: Iterable[Path], *, what: str) -> Path:
-    p = ensure_within_roots(value, roots, what=what)
+def existing_dir(value: str, config: Config, *, what: str) -> Path:
+    p = config.safe_path(value, what=what)
     if not p.is_dir():
         raise ValueError(f"{what} no existe o no es un directorio: {str(p)!r}")
     return p
