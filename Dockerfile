@@ -29,6 +29,8 @@ RUN uv venv /opt/venv && uv pip install --python /opt/venv/bin/python -e ".[dev]
 ENV PATH="/opt/venv/bin:$PATH"
 COPY tests ./tests
 COPY examples ./examples
+# tests/test_select_tests.py importa scripts/select_tests.py.
+COPY scripts ./scripts
 
 FROM base AS test
 CMD ["python", "-m", "pytest", "-q"]
@@ -49,5 +51,4 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/* \
  && uv pip install --python /opt/venv/bin/python -e ".[demo]"
-COPY scripts ./scripts
 CMD ["sh", "scripts/make_demos.sh", "/out"]
