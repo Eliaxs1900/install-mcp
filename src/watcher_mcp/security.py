@@ -192,7 +192,9 @@ def ensure_safe_path(
         for pattern in protected_home_dirs:
             parts = PurePosixPath(pattern).parts
             if len(relative) >= len(parts) and all(
-                fnmatch.fnmatchcase(rel, pat) for rel, pat in zip(relative, parts, strict=False)
+                # Sin distinguir mayúsculas: el disco de macOS (APFS por defecto) tampoco lo hace, y
+                # ~/library/launchagents es la misma carpeta que ~/Library/LaunchAgents.
+                fnmatch.fnmatchcase(rel.lower(), pat.lower()) for rel, pat in zip(relative, parts, strict=False)
             ):
                 raise ValueError(
                     f"La {what} {str(resolved)!r} está en ~/{'/'.join(relative[:len(parts)])}, una zona "
