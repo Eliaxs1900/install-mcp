@@ -1,74 +1,62 @@
 """Plantilla de backend: copia este fichero para añadir un instalador nuevo.
 
-Ejemplo ilustrativo (NO registrado): ``git`` clone/pull. Muestra las piezas que
-el núcleo espera. Ver docs/design.md, sección "Cómo añadir un backend".
+Esqueleto mínimo (NO registrado). Los backends reales de este paquete (git.py, pip.py,
+download.py, ecosystems.py, jvm.py, system.py) sirven de ejemplos completos.
+Ver docs/design.md, "Cómo añadir un backend".
 
 Para activarlo sin tocar el paquete:
 
     # config.toml
-    plugins = ["mi_paquete.git_backend:GitBackend"]
-    allowed_backends = ["pip", "git"]
+    plugins = ["mi_paquete.mi_backend:MiBackend"]
+    allowed_backends = ["pip", "mi-backend"]
 """
 
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from typing import Any
 
 from pydantic import Field
 
-from ..security import ensure_within_roots, require_https, url_secrets
-from .base import Backend, BackendParams, CommandStep, Plan, Probe
+from .base import Backend, CommandStep, Plan, Probe
+from .common import LimitParams, check_all, named_or_absolute_dir
 
-_REF = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
-
-
-class GitParams(BackendParams):
-    url: str = Field(..., description="Repositorio https://")
-    dest: str = Field(..., description="Directorio destino absoluto dentro de las raíces permitidas")
-    ref: str | None = Field(None, description="Rama, tag o commit")
-    depth: int | None = Field(1, ge=1)
+_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 
-class GitBackend(Backend[GitParams]):
-    name = "git"
-    description = "Clona o actualiza un repositorio git (solo https)."
-    Params = GitParams
-    executables = ("git",)
+class MiParams(LimitParams):  # LimitParams aporta job_timeout_s y stall_timeout_s
+    packages: list[str] = Field(..., min_length=1, description="Qué instalar.")
+    dest: str = Field("default", description="Nombre (<state_dir>/mi/<nombre>) o ruta absoluta.")
 
-    def check(self, spec: GitParams) -> None:
-        require_https(spec.url, what="url")
-        ensure_within_roots(spec.dest, self.config.roots(), what="dest")
-        if spec.ref and (spec.ref.startswith("-") or not _REF.match(spec.ref)):
-            raise ValueError(f"ref no válida: {spec.ref!r}")
 
-    def requires_privileges(self, spec: GitParams) -> bool:
-        return False  # apt-get devolvería True
+class MiBackend(Backend[MiParams]):
+    name = "mi-backend"
+    description = "Describe en una línea qué instala."
+    Params = MiParams
+    executables = ("mi-herramienta",)       # comprobados por availability()
+    default_stall_timeout_s = 300.0          # si la herramienta pasa tiempo callada, súbelo
+    default_io_mode = None                   # "pty" si es un programa C que bufferiza stdout
 
-    def plan(self, spec: GitParams) -> Plan:
-        dest = ensure_within_roots(spec.dest, self.config.roots(), what="dest")
-        env = {"GIT_TERMINAL_PROMPT": "0"}  # nunca pedir credenciales por terminal
-        exists = (dest / ".git").exists()
-        if exists:
-            steps = [CommandStep("pull", ["git", "-C", str(dest), "pull", "--ff-only", "--progress"], env=env)]
-        else:
-            clone = ["git", "clone", "--progress"]
-            if spec.depth:
-                clone += ["--depth", str(spec.depth)]
-            if spec.ref:
-                clone += ["--branch", spec.ref]
-            steps = [CommandStep("clone", [*clone, "--", spec.url, str(dest)], env=env)]
+    def check(self, spec: MiParams) -> None:
+        check_all(spec.packages, _NAME, what="paquete")   # regex estricta, nada que empiece por "-"
+        self.dest(spec)                                   # valida la ruta contra allowed_roots
+
+    def dest(self, spec: MiParams):  # noqa: ANN201
+        return named_or_absolute_dir(spec.dest, self.config.state_dir / "mi", self.config.roots(), what="dest")
+
+    def plan(self, spec: MiParams) -> Plan:
+        d = self.dest(spec)
         return Plan(
-            summary=f"git {'pull' if exists else 'clone'} {spec.url} -> {dest}",
-            steps=steps,
-            lock_key=f"path:{dest}",
-            secrets=url_secrets(spec.url),
+            summary=f"mi-herramienta install {' '.join(spec.packages)} en {d}",
+            steps=[CommandStep("install", ["mi-herramienta", "install", "--into", str(d), "--", *spec.packages],
+                               env={"MI_NO_PROMPT": "1"})],
+            lock_key=f"path:{d}",
+            **spec.limits(),
         )
 
-    async def detect_versions(self, spec: GitParams, probe: Probe) -> dict[str, str]:
-        res = await probe(["git", "-C", spec.dest, "rev-parse", "--short", "HEAD"])
-        return {Path(spec.dest).name: res.stdout.strip()} if res.exit_code == 0 else {}
+    async def detect_versions(self, spec: MiParams, probe: Probe) -> dict[str, str]:
+        res = await probe(["mi-herramienta", "list", "--into", str(self.dest(spec))], timeout_s=30)
+        return dict(line.split(maxsplit=1) for line in res.stdout.splitlines() if " " in line)
 
-    def result_info(self, spec: GitParams) -> dict[str, Any]:
-        return {"path": spec.dest}
+    def result_info(self, spec: MiParams) -> dict[str, Any]:
+        return {"dest": str(self.dest(spec))}

@@ -29,6 +29,8 @@ No hace falta sondear: al terminar llega notifications/message con el informe (�
 salida, duración, versiones instaladas y, si falló, las líneas relevantes del log), y si el proceso se
 queda sin salida llega un aviso `stalled` con pid, comando y últimas líneas. Mientras tanto puedes seguir
 trabajando. Estados: queued, running, stalled, succeeded, failed, cancelled, timed_out.
+Backends: web (download, binary), código (pip, git, npm, cargo, go, maven, gradle), sistema (brew,
+apt, docker) y comandos largos (run, con allowlist). backends() da los parámetros de cada uno.
 Herramientas útiles: logs(job_id, tail) para ver la salida en vivo; wait(job_id) para una espera acotada.
 Suscríbete a job://<id> para recibir notifications/resources/updated.
 """

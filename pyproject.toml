@@ -31,7 +31,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "trustme>=1.1"]
 # Solo para regenerar los GIF/PNG de docs/demos (scripts/render_cast.py).
 demo = ["pillow>=10"]
 
@@ -49,5 +49,8 @@ packages = ["src/install_mcp"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-markers = ["integration: lanza instaladores reales (uv/pip) en modo offline"]
+markers = [
+    "integration: lanza instaladores reales en modo offline",
+    "network: necesita red e instala de verdad (solo con INSTALL_MCP_NETWORK_TESTS=1, pensado para Docker)",
+]
 filterwarnings = ["ignore::mcp.shared.exceptions.MCPDeprecationWarning"]

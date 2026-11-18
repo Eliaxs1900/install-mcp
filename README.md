@@ -12,8 +12,8 @@ un informe: éxito o fallo, código de salida, duración, versiones instaladas y
 relevantes del log. **Ninguna espera es infinita**: `wait` tiene un tope duro y cada
 job tiene un timeout global (`timed_out`).
 
-> **English:** an MCP server that runs installs (pip/uv today; git, apt, curl, brew… by
-> design) as background jobs. It returns a job id immediately and streams unbuffered
+> **English:** an MCP server that runs installs (pip/uv, git, https downloads and binaries,
+> npm, cargo, go, maven, gradle, brew, apt, docker pull, allowlisted commands) as background jobs. It returns a job id immediately and streams unbuffered
 > logs. A watchdog flags stalled processes, every wait is bounded, and an MCP
 > notification carries a report when the job ends.
 
@@ -120,7 +120,7 @@ flowchart LR
     S -- "notifications/message<br/>resources/updated · progress" --> C
     S --> J["jobs.py · núcleo<br/>cola · locks · límites<br/>watchdog · informe"]
     J --> P["process.py<br/>exec sin shell · pipe/pty<br/>SIGTERM → SIGKILL"]
-    J --> B["backends/<br/>pip ✅ · git · apt · curl<br/>brew · npm · cargo…"]
+    J --> B["backends/<br/>web: download · binary<br/>código: pip · git · npm · cargo · go · maven · gradle<br/>sistema: brew · apt · docker · run"]
     J -. "output.log · job.json<br/>report.json" .-> D[("~/.local/state/<br/>install-mcp")]
 ```
 
@@ -192,6 +192,38 @@ Recursos: `job://<id>` (estado + informe) y `jobs://list`. Los avisos van a quie
 el job (`notifications/message`, con el informe en `data.report`) y a quien esté
 suscrito a `job://<id>` (`notifications/resources/updated`).
 
+### Backends
+
+Cubren los focos de interacción habituales de un agente de código. Todos aceptan además
+`job_timeout_s` y `stall_timeout_s`. `backends()` devuelve el esquema completo de cada uno.
+
+| Foco | Backend | Para qué | Ejemplo de `params` |
+|---|---|---|---|
+| Web | `download` | Fichero por HTTPS, checksum opcional, extracción segura de tar/zip | `{"url": "https://…/fw.tar.gz", "dest": "~/fw", "extract": true, "checksum": "sha256:…"}` |
+| Web | `binary` | Ejecutable suelto (checksum **obligatorio**), también dentro de un tar/zip | `{"url": "https://…/jq-linux-arm64", "checksum": "sha256:…", "name": "jq"}` |
+| Código | `pip` | Paquetes Python en un venv aislado (uv si está) | `{"packages": ["pypdf"], "venv": "tools"}` |
+| Código | `git` | Clonar/actualizar (https, ssh, local) sin prompts de credenciales | `{"url": "git@github.com:org/repo.git", "dest": "/abs/repo", "depth": 1}` |
+| Código | `npm` | Paquetes en un prefijo aislado, o dependencias de un proyecto (npm ci/pnpm/yarn) | `{"project_dir": "/abs/web"}` |
+| Código | `cargo` | `cargo install` en una raíz aislada | `{"crates": ["ripgrep@14.1.1"]}` |
+| Código | `go` | `go install ruta@versión` en un GOBIN aislado | `{"packages": ["golang.org/x/tools/gopls@latest"]}` |
+| Código | `maven` | Artefactos a `~/.m2`, o objetivos de un proyecto (allowlist) con `mvnw` si existe | `{"project_dir": "/abs/app", "goals": ["package"], "skip_tests": true}` |
+| Código | `gradle` | Tareas de un proyecto (allowlist) con `gradlew` si existe | `{"project_dir": "/abs/app", "tasks": ["build"]}` |
+| Sistema | `brew` | Fórmulas y casks sin auto-update ni prompts | `{"formulae": ["binwalk", "p7zip"]}` |
+| Sistema | `apt` | apt-get (Debian/Ubuntu/WSL). **Privilegiado**: requiere `allow_privileged = true` | `{"packages": ["binwalk", "squashfs-tools"]}` |
+| Sistema | `docker` | `docker pull` de imágenes | `{"images": ["python:3.12-slim"]}` |
+| Comandos | `run` | Builds y tests largos con un programa de una allowlist. **Desactivado** por defecto | `{"program": "mvn", "args": ["-B", "verify"], "cwd": "/abs/app"}` |
+
+Por defecto están permitidos todos menos `apt` y `run`. Para activarlos:
+
+```toml
+allowed_backends = ["pip", "git", "download", "binary", "npm", "cargo", "go", "maven", "gradle",
+                    "brew", "docker", "apt", "run"]
+allow_privileged = true                  # solo si quieres apt (usa `sudo -n`: nunca pide contraseña)
+
+[backends.run]
+programs = ["mvn", "pytest", "make"]     # lo único que `run` puede ejecutar
+```
+
 ### Límites
 
 | Qué | Por defecto | Al vencer |
@@ -241,9 +273,22 @@ docker build --target test -t install-mcp:test .
 docker run --rm install-mcp:test
 ```
 
-Son 52 tests: jobs en paralelo, logs en vivo, cancelación, `stalled`, `timed_out`,
-`wait` acotado, pipe frente a pty, notificaciones de punta a punta por MCP,
-redacción de secretos e instalaciones reales offline con pip y con uv.
+Son 69 tests sin red:
+- núcleo: jobs en paralelo, logs en vivo, cancelación, `stalled`, `timed_out`, `wait`
+  acotado, pipe frente a pty, notificaciones de punta a punta por MCP y redacción de
+  secretos;
+- validación y plan de los 13 backends;
+- instalaciones reales offline: pip/uv con un wheel local, git con repos locales,
+  descargas y binarios contra un servidor HTTPS local (checksum, extracción segura,
+  redirección a http rechazada, atasco y cancelación) y `run`.
+
+Otros 6 hacen instalaciones reales contra internet (pip, git, download, apt, npm y go).
+Se ejecutan en su propio contenedor:
+
+```bash
+docker build --target integration -t install-mcp:integration .
+docker run --rm install-mcp:integration
+```
 
 Para regenerar las demos (graban en un pty dentro del contenedor y renderizan GIF/PNG):
 
@@ -269,8 +314,10 @@ src/install_mcp/
   security.py            redacción, https, checksums, raíces permitidas
   config.py              configuración
   backends/base.py       interfaz Backend / Plan / CommandStep / FuncStep
-  backends/pip.py        backend pip/uv
-  backends/_template.py  plantilla (git) para nuevos backends
+  backends/pip.py        pip/uv            backends/git.py         git
+  backends/download.py   download, binary  backends/ecosystems.py  npm, cargo, go
+  backends/jvm.py        maven, gradle     backends/system.py      brew, apt, docker, run
+  backends/_template.py  esqueleto para nuevos backends
 docs/design.md           diseño
 docs/demos/              GIF, PNG y .cast de las demos
 examples/                demos, comparativa, slowpkg, cliente mínimo y configuración
@@ -280,8 +327,9 @@ tests/                   pytest
 
 ## Limitaciones
 
-- Solo está implementado el backend `pip`. El resto está diseñado
-  ([docs/design.md §7](docs/design.md)), con una plantilla para `git`.
+- `wsl` (delegar un backend dentro de una distro) está diseñado pero no implementado.
+- `brew`, `cargo`, `maven`, `gradle` y `docker` tienen tests de validación y plan, pero
+  no de instalación real en CI.
 - Funciona en macOS y Linux (también WSL). En Windows nativo faltaría la cancelación
   por grupo de procesos.
 - Los jobs en curso no sobreviven a un reinicio del servidor: se marcan como interrumpidos.

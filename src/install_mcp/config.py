@@ -27,8 +27,14 @@ def _default_state_dir() -> Path:
 class Config:
     # Dónde se persisten jobs (``jobs/<id>/``) y los venvs por nombre (``venvs/<nombre>``).
     state_dir: Path = field(default_factory=_default_state_dir)
-    # Allowlist: solo estos backends se pueden usar aunque haya más registrados.
-    allowed_backends: list[str] = field(default_factory=lambda: ["pip"])
+    # Allowlist: solo estos backends se pueden usar aunque haya más registrados. Por defecto,
+    # los instaladores en espacio de usuario. Fuera quedan ``apt`` (necesita root) y ``run``
+    # (ejecuta comandos de una lista de programas que hay que configurar).
+    allowed_backends: list[str] = field(
+        default_factory=lambda: [
+            "pip", "git", "download", "binary", "npm", "cargo", "go", "maven", "gradle", "brew", "docker",
+        ]
+    )
     # Backends que declaran necesitar privilegios (apt-get, ...) se rechazan salvo que esto sea True.
     allow_privileged: bool = False
     # Prefijo usado para los pasos privilegiados cuando allow_privileged=True. ``-n``: nunca pide contraseña.

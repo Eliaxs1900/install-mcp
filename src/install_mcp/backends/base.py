@@ -51,7 +51,7 @@ class ProbeResult:
     stderr: str
 
 
-# probe(argv, env=None) -> ProbeResult. Ejecuta un comando corto capturando salida
+# probe(argv, env=None, timeout_s=60, cwd=None) -> ProbeResult. Ejecuta un comando corto capturando salida
 # (sin shell, con timeout). Lo proporciona el núcleo a ``detect_versions``.
 Probe = Callable[..., Awaitable[ProbeResult]]
 
