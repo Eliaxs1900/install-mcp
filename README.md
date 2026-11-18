@@ -307,6 +307,7 @@ En CI:
 
 - en un PR, las puntuales seleccionadas corren en la matriz completa y las E2E seleccionadas en un Python por sistema;
 - en `main` se ejecuta siempre todo.
+- el check `resultado` resume los demás (pasa si todo lo ejecutado pasó; un nivel omitido cuenta como bien). Es el único check obligatorio para integrar en `main`, porque los nombres de la matriz cambian según la selección.
 
 En local:
 
