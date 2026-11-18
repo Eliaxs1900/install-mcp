@@ -161,3 +161,15 @@ class Backend(ABC, Generic[P]):
 
     def result_info(self, spec: P) -> dict[str, Any]:
         return {}
+
+    def summarize(self, spec: P, output: list[str], *, ok: bool) -> dict[str, Any]:
+        """Resumen propio del backend a partir de la salida (stdout/stderr) del job.
+
+        Claves opcionales del dict devuelto:
+
+        * ``report``: dict que se añade al informe (p. ej. ``{"tests": {...}}``).
+        * ``headline``: texto corto que se añade al titular (``"61 tests, 0 fallos"``).
+        * ``error_detail``: causa concreta de un fallo; se añade a ``error`` y al titular.
+        * ``hint``: sugerencia accionable para el agente.
+        """
+        return {}
