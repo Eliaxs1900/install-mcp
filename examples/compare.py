@@ -1,4 +1,4 @@
-"""Comparativa real: la forma original (Bash + pip) frente a install-mcp, con el mismo paquete.
+"""Comparativa real: la forma original (Bash + pip) frente a watcher-mcp, con el mismo paquete.
 
     .venv/bin/python examples/compare.py [--build-seconds 25] [--limit 8]
 
@@ -9,7 +9,7 @@ ANTES — lo que hacía el agente al principio:
   1. Bash ``pip install …``: la llamada bloquea al agente. Claude Code la corta a los 120 s
      y la deja en segundo plano escribiendo en un fichero (aquí el límite va a escala: --limit).
   2. A partir de ahí solo puede leer ese fichero de vez en cuando (``cat``/``tail``).
-DESPUÉS — install-mcp:
+DESPUÉS — watcher-mcp:
   ``install`` responde al instante; el servidor avisa del atasco y del final por notificaciones MCP.
 
 Todas las cifras de la tabla final se miden en esta ejecución.
@@ -78,7 +78,7 @@ async def before(work: Path, wheels: Path, limit: float) -> dict:
 
 
 async def after(state: Path, wheels: Path) -> dict:
-    heading("DESPUÉS · install-mcp")
+    heading("DESPUÉS · watcher-mcp")
     d = Demo(state)
     async with d.connect():
         t_start = time.monotonic()
@@ -112,7 +112,7 @@ def table(a: dict, b: dict, limit: float) -> None:
         ("Informe final", f"texto bruto (exit {a['exit']})", f"exit {b['exit']}, slowpkg {b['installed']}, duración"),
     ]
     w0, w1 = 30, 38
-    print(f"{BOLD}  {'':<{w0}} {'ANTES (Bash + pip)':<{w1}} DESPUÉS (install-mcp){RESET}")
+    print(f"{BOLD}  {'':<{w0}} {'ANTES (Bash + pip)':<{w1}} DESPUÉS (watcher-mcp){RESET}")
     for k, x, y in rows:
         print(f"  {k:<{w0}} {RED}{x:<{w1}}{RESET} {GREEN}{y}{RESET}")
     print(flush=True)

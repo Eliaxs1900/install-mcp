@@ -2,9 +2,9 @@
 
 Orden de carga: valores por defecto < fichero TOML < variables de entorno.
 
-* Fichero: ``--config RUTA``, o ``$INSTALL_MCP_CONFIG``, o
-  ``~/.config/install-mcp/config.toml`` si existe.
-* Entorno: ``INSTALL_MCP_STATE_DIR`` (dónde se guardan jobs y logs).
+* Fichero: ``--config RUTA``, o ``$WATCHER_MCP_CONFIG``, o
+  ``~/.config/watcher-mcp/config.toml`` si existe.
+* Entorno: ``WATCHER_MCP_STATE_DIR`` (dónde se guardan jobs y logs).
 
 Ver ``examples/config.example.toml``.
 """
@@ -20,7 +20,7 @@ from typing import Any
 
 def _default_state_dir() -> Path:
     base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
-    return Path(base) / "install-mcp"
+    return Path(base) / "watcher-mcp"
 
 
 @dataclass
@@ -92,15 +92,15 @@ class Config:
     @classmethod
     def load(cls, path: str | Path | None = None) -> Config:
         data: dict[str, Any] = {}
-        candidate = path or os.environ.get("INSTALL_MCP_CONFIG")
+        candidate = path or os.environ.get("WATCHER_MCP_CONFIG")
         if candidate is None:
-            default = Path.home() / ".config" / "install-mcp" / "config.toml"
+            default = Path.home() / ".config" / "watcher-mcp" / "config.toml"
             candidate = default if default.exists() else None
         if candidate is not None:
             with open(Path(candidate).expanduser(), "rb") as fh:
                 data = tomllib.load(fh)
         cfg = cls.from_dict(data)
-        if env_state := os.environ.get("INSTALL_MCP_STATE_DIR"):
+        if env_state := os.environ.get("WATCHER_MCP_STATE_DIR"):
             cfg.state_dir = Path(env_state).expanduser()
         return cfg
 

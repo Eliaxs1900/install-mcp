@@ -1,13 +1,14 @@
-# install-mcp — documento de diseño
+# watcher-mcp — documento de diseño
 
 ## 1. Problema
 
-Las instalaciones (`pip install`, `git clone`, `apt-get install`, descargas de
-firmware…) tardan más que el timeout de una llamada de herramienta (120 s en el
-Bash de Claude Code). Lanzadas a mano en segundo plano, la salida llega vacía o con
-buffering y no se sabe en qué punto van, si han fallado ni por qué.
+Las instalaciones, descargas, clones, builds y tests (`pip install`, `git clone`,
+`apt-get install`, descargas de firmware, `mvn verify`…) tardan más que el timeout de una
+llamada de herramienta (120 s en el Bash de Claude Code). Lanzados a mano en segundo
+plano, la salida llega vacía o con buffering y no se sabe en qué punto van, si han
+fallado ni por qué.
 
-`install-mcp` es un servidor MCP que **centraliza cualquier instalación**:
+`watcher-mcp` es un servidor MCP que **lanza y vigila cualquier trabajo largo**:
 
 - la lanza como **job en segundo plano** y devuelve un `job_id` al instante;
 - guarda su salida **línea a línea, sin buffering**, en memoria y en disco;
@@ -188,7 +189,7 @@ El SDK `mcp` 2.x habla dos generaciones del protocolo; el servidor cubre ambas.
 | Mecanismo | Cuándo | A quién | Contenido |
 |---|---|---|---|
 | `notifications/progress` | Mientras dura `wait` (o `install` con `wait_s>0`), como mucho 1/s y solo si hubo cambios | La petición en curso (su `progressToken`) | `progress`/`total` = pasos completados + fracción del paso actual; `message` = paso y última línea |
-| `notifications/message` (logging) | Eventos `queued`, `started`, `step`, `stalled`, `resumed`, `finished` | La conexión que llamó a `install` + suscritos a `job://<id>` o `jobs://list` | `data = {message, event, job_id, uri, state, current_step, …}`; `stalled` añade `pid`, `command`, `step`, `silent_for_s`, `stall_timeout_s`, `log_tail`; `finished` añade `report`. `logger = "install-mcp"`; nivel `info`, `warning` (stalled, cancelado) o `error` (failed, timed_out) |
+| `notifications/message` (logging) | Eventos `queued`, `started`, `step`, `stalled`, `resumed`, `finished` | La conexión que llamó a `install` + suscritos a `job://<id>` o `jobs://list` | `data = {message, event, job_id, uri, state, current_step, …}`; `stalled` añade `pid`, `command`, `step`, `silent_for_s`, `stall_timeout_s`, `log_tail`; `finished` añade `report`. `logger = "watcher-mcp"`; nivel `info`, `warning` (stalled, cancelado) o `error` (failed, timed_out) |
 | `notifications/resources/updated` | Cada evento del job; `jobs://list` al encolar, atascarse, reanudarse y terminar | Conexiones suscritas con `resources/subscribe` | `uri` |
 | `subscriptions/listen` (2026-07-28) | Igual que la anterior | Clientes modernos | `ResourceUpdated(uri)` publicado en el bus del SDK |
 
@@ -329,7 +330,7 @@ tal cual; lo controla quien escribe el fichero).
 
 ## 9. Cómo añadir un backend
 
-1. Copia `src/install_mcp/backends/_template.py` (ejemplo de `git`).
+1. Copia `src/watcher_mcp/backends/_template.py` (ejemplo de `git`).
 2. Define `Params(BackendParams)` con tipos estrictos y descripciones (el cliente las ve
    en `backends()`).
 3. En `check()` valida lo que pydantic no puede: regex de nombres, `reject_option_like`,

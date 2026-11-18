@@ -130,7 +130,7 @@ def main() -> None:
         header = json.loads(fh.readline())
         events = [json.loads(line) for line in fh if line.strip()]
     cols, rows = header["width"], a.rows or header["height"]
-    painter = Painter(cols, header.get("title") or "install-mcp")
+    painter = Painter(cols, header.get("title") or "watcher-mcp")
     screen = Screen(cols)
 
     # Agrupa eventos cercanos (<80 ms) en un fotograma.

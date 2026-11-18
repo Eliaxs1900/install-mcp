@@ -1,4 +1,4 @@
-"""Demos reales de install-mcp, por stdio (igual que lo lanza Claude Code).
+"""Demos reales de watcher-mcp, por stdio (igual que lo lanza Claude Code).
 
     .venv/bin/python examples/demo.py install   # pypdf desde PyPI vía uv: éxito con aviso al terminar
     .venv/bin/python examples/demo.py fail      # paquete inexistente: fallo con líneas relevantes
@@ -6,7 +6,7 @@
     .venv/bin/python examples/demo.py timeout   # compilación eterna: 'timed_out' y proceso terminado
 
 Todo lo que se imprime viene del servidor real; solo se acortan las rutas del usuario a ``~``.
-El estado de la demo va a ``~/.cache/install-mcp-demo`` (cámbialo con INSTALL_MCP_DEMO_STATE).
+El estado de la demo va a ``~/.cache/watcher-mcp-demo`` (cámbialo con WATCHER_MCP_DEMO_STATE).
 """
 
 from __future__ import annotations
@@ -47,15 +47,15 @@ async def scenario(name: str) -> None:
     stamp = int(time.time())
     async with d.connect():
         if name == "install":
-            heading("install-mcp · instalación real desde PyPI (uv)")
+            heading("watcher-mcp · instalación real desde PyPI (uv)")
             params = {"packages": ["pypdf"], "venv": f"demo-{stamp}"}
         elif name == "fail":
-            heading("install-mcp · fallo con informe")
+            heading("watcher-mcp · fallo con informe")
             params = {"packages": ["paquete-que-no-existe-xyz"], "venv": f"demo-fail-{stamp}", "installer": "pip"}
         else:
             build_s = 18 if name == "stall" else 600
             wheels = make_slow_sdist(state / f"wheels-{stamp}", build_s).parent
-            heading(f"install-mcp · {'atasco detectado (stalled)' if name == 'stall' else 'timeout global (timed_out)'}")
+            heading(f"watcher-mcp · {'atasco detectado (stalled)' if name == 'stall' else 'timeout global (timed_out)'}")
             say(f"slowpkg: sdist local que tarda {build_s}s en compilar sin escribir nada", DIM)
             params = {
                 "packages": ["slowpkg"], "venv": f"demo-{name}-{stamp}", "installer": "pip",

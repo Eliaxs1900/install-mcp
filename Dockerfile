@@ -1,14 +1,14 @@
 # Imagen para ejecutar los tests y grabar las demos sin tocar el sistema local.
 #
-#   docker build --target test -t install-mcp:test .
-#   docker run --rm install-mcp:test                      # pytest (sin red)
+#   docker build --target test -t watcher-mcp:test .
+#   docker run --rm watcher-mcp:test                      # pytest (sin red)
 #   (otra versión de Python: --build-arg PYTHON=3.11)
 #
-#   docker build --target integration -t install-mcp:integration .
-#   docker run --rm install-mcp:integration               # instalaciones reales (apt, npm, go...)
+#   docker build --target integration -t watcher-mcp:integration .
+#   docker run --rm watcher-mcp:integration               # instalaciones reales (apt, npm, go...)
 #
-#   docker build --target demo -t install-mcp:demo .
-#   docker run --rm -v "$PWD/docs/demos:/out" install-mcp:demo   # graba y renderiza docs/demos/*
+#   docker build --target demo -t watcher-mcp:demo .
+#   docker run --rm -v "$PWD/docs/demos:/out" watcher-mcp:demo   # graba y renderiza docs/demos/*
 
 ARG PYTHON=3.12
 FROM python:${PYTHON}-slim AS base
@@ -34,13 +34,13 @@ FROM base AS test
 CMD ["python", "-m", "pytest", "-q"]
 
 # Instalaciones reales contra internet (apt, npm, go, pip, git, download).
-#   docker build --target integration -t install-mcp:integration .
-#   docker run --rm install-mcp:integration
+#   docker build --target integration -t watcher-mcp:integration .
+#   docker run --rm watcher-mcp:integration
 FROM base AS integration
 RUN apt-get update \
  && apt-get install -y --no-install-recommends nodejs npm golang-go ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-ENV INSTALL_MCP_NETWORK_TESTS=1
+ENV WATCHER_MCP_NETWORK_TESTS=1
 CMD ["python", "-m", "pytest", "-q", "-m", "network", "-rA"]
 
 FROM base AS demo

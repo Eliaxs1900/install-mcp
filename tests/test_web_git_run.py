@@ -18,9 +18,9 @@ from pathlib import Path
 
 import pytest
 
-from install_mcp.backends import BUILTIN
-from install_mcp.config import Config
-from install_mcp.jobs import JobManager, JobState
+from watcher_mcp.backends import BUILTIN
+from watcher_mcp.config import Config
+from watcher_mcp.jobs import JobManager, JobState
 
 trustme = pytest.importorskip("trustme")
 

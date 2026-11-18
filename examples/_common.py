@@ -55,7 +55,7 @@ def payload(result: types.CallToolResult) -> Any:
 
 
 def demo_state_dir() -> Path:
-    return Path(os.environ.get("INSTALL_MCP_DEMO_STATE", Path.home() / ".cache" / "install-mcp-demo"))
+    return Path(os.environ.get("WATCHER_MCP_DEMO_STATE", Path.home() / ".cache" / "watcher-mcp-demo"))
 
 
 class Demo:
@@ -87,7 +87,7 @@ class Demo:
 
     def connect(self) -> Client:
         params = StdioServerParameters(
-            command=sys.executable, args=["-m", "install_mcp", "--state-dir", str(self.state_dir)]
+            command=sys.executable, args=["-m", "watcher_mcp", "--state-dir", str(self.state_dir)]
         )
         self.client = Client(params, mode="legacy", logging_callback=self.on_log, message_handler=self.on_message)
         return self.client

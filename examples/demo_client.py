@@ -37,7 +37,7 @@ async def main() -> None:
     ap.add_argument("--state-dir", default=None)
     args = ap.parse_args()
 
-    server_args = ["-m", "install_mcp"] + (["--state-dir", args.state_dir] if args.state_dir else [])
+    server_args = ["-m", "watcher_mcp"] + (["--state-dir", args.state_dir] if args.state_dir else [])
     params = StdioServerParameters(command=sys.executable, args=server_args)
 
     async def on_log(p: types.LoggingMessageNotificationParams) -> None:

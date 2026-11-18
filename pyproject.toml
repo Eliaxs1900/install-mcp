@@ -3,15 +3,15 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "install-mcp"
-version = "0.1.0"
-description = "Servidor MCP que ejecuta instalaciones (pip, y en el futuro git, apt-get, wget...) como jobs en segundo plano con logs en vivo, progreso y aviso al terminar."
+name = "watcher-mcp"
+version = "0.2.0"
+description = "Servidor MCP que lanza y vigila trabajos largos (instalaciones, descargas, clones, builds y tests) en segundo plano: logs en vivo, aviso de atasco, esperas acotadas e informe al terminar."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Elías Martín" }]
 requires-python = ">=3.11"
-keywords = ["mcp", "model-context-protocol", "claude", "installer", "pip", "uv", "background-jobs"]
+keywords = ["mcp", "model-context-protocol", "claude", "watchdog", "background-jobs", "installer", "build", "pip", "uv"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -36,14 +36,14 @@ dev = ["pytest>=8", "pytest-asyncio>=0.24", "trustme>=1.1"]
 demo = ["pillow>=10"]
 
 [project.urls]
-Homepage = "https://github.com/Eliaxs1900/install-mcp"
-Issues = "https://github.com/Eliaxs1900/install-mcp/issues"
+Homepage = "https://github.com/Eliaxs1900/watcher-mcp"
+Issues = "https://github.com/Eliaxs1900/watcher-mcp/issues"
 
 [project.scripts]
-install-mcp = "install_mcp.__main__:main"
+watcher-mcp = "watcher_mcp.__main__:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/install_mcp"]
+packages = ["src/watcher_mcp"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -51,6 +51,6 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 markers = [
     "integration: lanza instaladores reales en modo offline",
-    "network: necesita red e instala de verdad (solo con INSTALL_MCP_NETWORK_TESTS=1, pensado para Docker)",
+    "network: necesita red e instala de verdad (solo con WATCHER_MCP_NETWORK_TESTS=1, pensado para Docker)",
 ]
 filterwarnings = ["ignore::mcp.shared.exceptions.MCPDeprecationWarning"]

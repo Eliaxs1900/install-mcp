@@ -128,7 +128,7 @@ class McpNotifier:
                 level, data = args
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", MCPDeprecationWarning)
-                    await session.send_log_message(level=level, data=data, logger="install-mcp")
+                    await session.send_log_message(level=level, data=data, logger="watcher-mcp")
             else:
                 await session.send_resource_updated(args[0])
         except Exception as exc:

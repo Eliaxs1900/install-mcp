@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from install_mcp.backends.pip import PipBackend
-from install_mcp.jobs import JobError, JobManager, JobState
+from watcher_mcp.backends.pip import PipBackend
+from watcher_mcp.jobs import JobError, JobManager, JobState
 
 from .conftest import build_wheel
 

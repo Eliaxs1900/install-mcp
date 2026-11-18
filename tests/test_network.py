@@ -1,7 +1,7 @@
-"""Instalaciones reales contra internet. Solo con INSTALL_MCP_NETWORK_TESTS=1 (pensado para Docker):
+"""Instalaciones reales contra internet. Solo con WATCHER_MCP_NETWORK_TESTS=1 (pensado para Docker):
 
-    docker build --target integration -t install-mcp:integration .
-    docker run --rm install-mcp:integration
+    docker build --target integration -t watcher-mcp:integration .
+    docker run --rm watcher-mcp:integration
 """
 
 from __future__ import annotations
@@ -11,13 +11,13 @@ import shutil
 
 import pytest
 
-from install_mcp.backends import BUILTIN
-from install_mcp.config import Config
-from install_mcp.jobs import JobManager, JobState
+from watcher_mcp.backends import BUILTIN
+from watcher_mcp.config import Config
+from watcher_mcp.jobs import JobManager, JobState
 
 pytestmark = [
     pytest.mark.network,
-    pytest.mark.skipif(os.environ.get("INSTALL_MCP_NETWORK_TESTS") != "1", reason="INSTALL_MCP_NETWORK_TESTS != 1"),
+    pytest.mark.skipif(os.environ.get("WATCHER_MCP_NETWORK_TESTS") != "1", reason="WATCHER_MCP_NETWORK_TESTS != 1"),
 ]
 
 

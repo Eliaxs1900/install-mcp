@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from install_mcp.jobs import JobEvent, JobManager, JobState
-from install_mcp.process import stdbuf_path
+from watcher_mcp.jobs import JobEvent, JobManager, JobState
+from watcher_mcp.process import stdbuf_path
 
 from .test_core import _alive
 

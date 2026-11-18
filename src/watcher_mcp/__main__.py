@@ -1,4 +1,4 @@
-"""Punto de entrada: ``install-mcp [--config RUTA] [--state-dir DIR]`` (transporte stdio)."""
+"""Punto de entrada: ``watcher-mcp [--config RUTA] [--state-dir DIR]`` (transporte stdio)."""
 
 from __future__ import annotations
 
@@ -13,9 +13,9 @@ from .server import create_server
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(prog="install-mcp", description="Servidor MCP de instalaciones en segundo plano")
+    parser = argparse.ArgumentParser(prog="watcher-mcp", description="Servidor MCP que lanza y vigila trabajos largos")
     parser.add_argument("--config", help="Fichero TOML de configuración")
-    parser.add_argument("--state-dir", help="Directorio de jobs/logs/venvs (por defecto ~/.local/state/install-mcp)")
+    parser.add_argument("--state-dir", help="Directorio de jobs/logs/venvs (por defecto ~/.local/state/watcher-mcp)")
     args = parser.parse_args(argv)
 
     # stdout es el canal MCP: cualquier log del servidor va a stderr.

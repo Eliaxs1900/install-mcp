@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from install_mcp.backends import BUILTIN
-from install_mcp.backends.base import CommandStep
-from install_mcp.config import Config
-from install_mcp.jobs import JobError, JobManager
+from watcher_mcp.backends import BUILTIN
+from watcher_mcp.backends.base import CommandStep
+from watcher_mcp.config import Config
+from watcher_mcp.jobs import JobError, JobManager
 
 
 @pytest.fixture

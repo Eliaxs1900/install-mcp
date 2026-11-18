@@ -11,10 +11,10 @@ from typing import Any
 import pytest
 from pydantic import Field
 
-from install_mcp.backends import BUILTIN, Backend, BackendParams, CommandStep, Plan
-from install_mcp.backends.base import Probe
-from install_mcp.config import Config
-from install_mcp.jobs import JobManager
+from watcher_mcp.backends import BUILTIN, Backend, BackendParams, CommandStep, Plan
+from watcher_mcp.backends.base import Probe
+from watcher_mcp.config import Config
+from watcher_mcp.jobs import JobManager
 
 # Script que simula un instalador: imprime líneas (sin flush: el núcleo debe forzar
 # salida sin buffering), mezcla stdout/stderr, puede lanzar un nieto y fallar.

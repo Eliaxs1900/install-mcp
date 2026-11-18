@@ -8,8 +8,8 @@ from typing import Any
 import mcp_types as types
 from mcp import Client
 
-from install_mcp.notify import McpNotifier
-from install_mcp.server import create_server
+from watcher_mcp.notify import McpNotifier
+from watcher_mcp.server import create_server
 
 
 def data(result: types.CallToolResult) -> Any:
@@ -80,7 +80,7 @@ async def test_end_to_end_install_wait_and_notify(config, registry):
         # notifications/message al terminar, con el informe.
         await wait_until(lambda: any(l.data.get("event") == "finished" for l in rec.logs))
         finished = next(l for l in rec.logs if l.data.get("event") == "finished")
-        assert finished.level == "info" and finished.logger == "install-mcp"
+        assert finished.level == "info" and finished.logger == "watcher-mcp"
         assert finished.data["report"]["job_id"] == job_id
         assert [l.data["event"] for l in rec.logs][:2] == ["queued", "started"]
 
@@ -164,7 +164,7 @@ async def test_bus_publish_for_modern_clients():
         async def publish(self, event):
             published.append(event.uri)
 
-    from install_mcp.jobs import JobEvent
+    from watcher_mcp.jobs import JobEvent
 
     class FakeJob:
         id, uri, state, current_step = "abc", "job://abc", "succeeded", None

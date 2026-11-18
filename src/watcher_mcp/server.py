@@ -23,7 +23,7 @@ from .jobs import JobError, JobManager
 from .notify import LIST_URI, McpNotifier
 
 INSTRUCTIONS = """\
-Servidor de instalaciones en segundo plano. Nunca bloquea: `install` devuelve un job_id al instante y
+Lanza y vigila trabajos largos (instalaciones, descargas, clones, builds, tests). Nunca bloquea: `install` devuelve un job_id al instante y
 ninguna espera es infinita (wait tiene tope duro; cada job tiene timeout global y watchdog de atasco).
 No hace falta sondear: al terminar llega notifications/message con el informe (éxito/fallo, código de
 salida, duración, versiones instaladas y, si falló, las líneas relevantes del log), y si el proceso se
@@ -43,7 +43,7 @@ def create_server(
     config = config or Config.load()
     manager = JobManager(config, registry if registry is not None else load_registry(config.plugins))
     manager.load_history()
-    mcp = MCPServer(name="install-mcp", instructions=INSTRUCTIONS, version="0.1.0")
+    mcp = MCPServer(name="watcher-mcp", instructions=INSTRUCTIONS, version="0.2.0")
     notifier = McpNotifier(bus=getattr(mcp, "_subscriptions", None))
     manager.listeners.append(notifier.on_event)
 

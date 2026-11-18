@@ -1,23 +1,25 @@
-# install-mcp
+# watcher-mcp
 
-[![tests](https://github.com/Eliaxs1900/install-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/Eliaxs1900/install-mcp/actions/workflows/tests.yml)
+[![tests](https://github.com/Eliaxs1900/watcher-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/Eliaxs1900/watcher-mcp/actions/workflows/tests.yml)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![MCP SDK](https://img.shields.io/badge/mcp-2.x-6f42c1)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Servidor MCP que ejecuta instalaciones **como jobs en segundo plano**. Devuelve un
-`job_id` al instante y guarda la salida línea a línea, sin buffering. Avisa por
-notificación MCP si el proceso se queda sin salida (`stalled`) y cuando termina, con
-un informe: éxito o fallo, código de salida, duración, versiones instaladas y líneas
+Servidor MCP que **lanza y vigila trabajos largos**: instalaciones, descargas, clones,
+builds y tests. Cada trabajo corre en segundo plano y la llamada devuelve un `job_id` al
+instante. La salida se guarda línea a línea, sin buffering. Un vigilante avisa por
+notificación MCP si el proceso se queda en silencio (`stalled`) y cuando termina, con un
+informe: éxito o fallo, código de salida, duración, versiones instaladas y líneas
 relevantes del log. **Ninguna espera es infinita**: `wait` tiene un tope duro y cada
-job tiene un timeout global (`timed_out`).
+trabajo tiene un tiempo máximo (`timed_out`).
 
-> **English:** an MCP server that runs installs (pip/uv, git, https downloads and binaries,
-> npm, cargo, go, maven, gradle, brew, apt, docker pull, allowlisted commands) as background jobs. It returns a job id immediately and streams unbuffered
+> **English:** an MCP server that launches and watches long-running jobs (pip/uv, git,
+> https downloads and binaries, npm, cargo, go, maven, gradle, brew, apt, docker pull,
+> allowlisted build/test commands). It returns a job id immediately and streams unbuffered
 > logs. A watchdog flags stalled processes, every wait is bounded, and an MCP
 > notification carries a report when the job ends.
 
-![Comparativa: Bash + pip frente a install-mcp](docs/demos/compare.gif)
+![Comparativa: Bash + pip frente a watcher-mcp](docs/demos/compare.gif)
 
 ## Por qué: la comparativa
 
@@ -33,7 +35,7 @@ wheel que se compila desde el código fuente. Todas las cifras se miden en la pr
 ejecución. Esta tabla sale de la grabación del GIF de arriba, hecha en un contenedor
 Docker:
 
-| | ANTES · Bash + pip | DESPUÉS · install-mcp |
+| | ANTES · Bash + pip | DESPUÉS · watcher-mcp |
 |---|---|---|
 | El agente recupera el control | a los 8 s (límite de Bash a escala; 120 s reales) | **0,04 s** |
 | Durante la compilación ve… | el log congelado en `Building wheel … started` | estado, pid, comando, segundos sin salida |
@@ -45,7 +47,7 @@ Docker:
 Con pip, el log no llega a estar vacío: pip escribe unas líneas y luego se calla
 mientras compila. Con programas que acumulan stdout en un buffer (herramientas en C,
 scripts de Python sin `-u`), el fichero sí queda **vacío** hasta el final.
-install-mcp lo resuelve con `io_mode = "pty"`. El test
+watcher-mcp lo resuelve con `io_mode = "pty"`. El test
 [`test_buffered_program_pipe_vs_pty`](tests/test_limits.py) lo demuestra: por tubería,
 0 líneas mientras el programa trabaja; con pty, en vivo.
 
@@ -91,25 +93,25 @@ Capturas completas: [compare](docs/demos/compare.png) ·
 ### Usado desde Claude Code
 
 Registrado con `claude mcp add` (ver más abajo), Claude Code ve las tools
-`mcp__install-mcp__*`. Esta es una ejecución real desde una sesión de Claude Code
+`mcp__watcher-mcp__*`. Esta es una ejecución real desde una sesión de Claude Code
 (solo se acortan las rutas):
 
 ```text
 → install(backend="pip", params={"packages": ["pypdf"], "venv": "claude-code-demo"})
 ← {"job_id": "718a09b210da", "state": "queued",
-   "summary": "pip install pypdf en ~/.local/state/install-mcp/venvs/claude-code-demo (vía uv)",
+   "summary": "pip install pypdf en ~/.local/state/watcher-mcp/venvs/claude-code-demo (vía uv)",
    "next": "wait('718a09b210da', timeout_s=60) o logs('718a09b210da', tail=30). …"}
 
 → wait(job_id="718a09b210da", timeout_s=60)
 ← {"done": true, "report": {
-     "headline": "[718a09b210da] OK en 0.6s – pip install pypdf en ~/.local/state/install-mcp/venvs/claude-code-demo (vía uv) (pypdf 7.1.1, (python) 3.15.2)",
+     "headline": "[718a09b210da] OK en 0.6s – pip install pypdf en ~/.local/state/watcher-mcp/venvs/claude-code-demo (vía uv) (pypdf 7.1.1, (python) 3.15.2)",
      "state": "succeeded", "exit_code": 0, "duration_s": 0.645,
      "steps": [{"name": "create-venv", "state": "ok", "exit_code": 0, "duration_s": 0.343, …},
                {"name": "install", "state": "ok", "exit_code": 0, "duration_s": 0.262,
                 "command": ["uv", "pip", "install", "--no-progress", "--python", "…/bin/python", "--", "pypdf"]}],
      "installed": {"pypdf": "7.1.1", "(python)": "3.15.2"},
      "limits": {"job_timeout_s": 3600, "stall_timeout_s": 600, "io_mode": "pipe"},
-     "info": {"venv": "~/.local/state/install-mcp/venvs/claude-code-demo", "installer": "uv", …}}}
+     "info": {"venv": "~/.local/state/watcher-mcp/venvs/claude-code-demo", "installer": "uv", …}}}
 ```
 
 ## Cómo funciona
@@ -121,7 +123,7 @@ flowchart LR
     S --> J["jobs.py · núcleo<br/>cola · locks · límites<br/>watchdog · informe"]
     J --> P["process.py<br/>exec sin shell · pipe/pty<br/>SIGTERM → SIGKILL"]
     J --> B["backends/<br/>web: download · binary<br/>código: pip · git · npm · cargo · go · maven · gradle<br/>sistema: brew · apt · docker · run"]
-    J -. "output.log · job.json<br/>report.json" .-> D[("~/.local/state/<br/>install-mcp")]
+    J -. "output.log · job.json<br/>report.json" .-> D[("~/.local/state/<br/>watcher-mcp")]
 ```
 
 - **Backends como planificadores puros**: un backend solo valida parámetros y devuelve
@@ -144,8 +146,8 @@ Diseño completo en [docs/design.md](docs/design.md).
 Requiere Python 3.11+.
 
 ```bash
-git clone https://github.com/Eliaxs1900/install-mcp.git
-cd install-mcp
+git clone https://github.com/Eliaxs1900/watcher-mcp.git
+cd watcher-mcp
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -e .
 ```
@@ -157,7 +159,7 @@ Sin uv: `python3 -m venv .venv && .venv/bin/pip install -e .`
 Desde la carpeta del proyecto, para todos tus proyectos:
 
 ```bash
-claude mcp add --scope user install-mcp -- "$PWD/.venv/bin/install-mcp"
+claude mcp add --scope user watcher-mcp -- "$PWD/.venv/bin/watcher-mcp"
 ```
 
 O solo para un proyecto, con un `.mcp.json` en su raíz:
@@ -165,15 +167,15 @@ O solo para un proyecto, con un `.mcp.json` en su raíz:
 ```json
 {
   "mcpServers": {
-    "install-mcp": {
-      "command": "/RUTA/ABSOLUTA/install-mcp/.venv/bin/install-mcp",
+    "watcher-mcp": {
+      "command": "/RUTA/ABSOLUTA/watcher-mcp/.venv/bin/watcher-mcp",
       "args": ["--config", "/RUTA/ABSOLUTA/config.toml"]
     }
   }
 }
 ```
 
-`args` es opcional; sin `--config` se usa `~/.config/install-mcp/config.toml` si existe.
+`args` es opcional; sin `--config` se usa `~/.config/watcher-mcp/config.toml` si existe.
 Comprueba que conecta con `claude mcp list`.
 
 ## Tools
@@ -263,14 +265,14 @@ Ver [examples/config.example.toml](examples/config.example.toml):
 - `[backends.<nombre>]`: límites e `io_mode` propios de un backend.
 - `plugins`: backends externos, como `"paquete.modulo:Clase"`.
 
-`INSTALL_MCP_STATE_DIR` cambia el directorio de estado (por defecto
-`~/.local/state/install-mcp`).
+`WATCHER_MCP_STATE_DIR` cambia el directorio de estado (por defecto
+`~/.local/state/watcher-mcp`).
 
 ## Tests y demos en Docker (sin ensuciar tu máquina)
 
 ```bash
-docker build --target test -t install-mcp:test .
-docker run --rm install-mcp:test
+docker build --target test -t watcher-mcp:test .
+docker run --rm watcher-mcp:test
 ```
 
 Son 69 tests sin red:
@@ -286,15 +288,15 @@ Otros 6 hacen instalaciones reales contra internet (pip, git, download, apt, npm
 Se ejecutan en su propio contenedor:
 
 ```bash
-docker build --target integration -t install-mcp:integration .
-docker run --rm install-mcp:integration
+docker build --target integration -t watcher-mcp:integration .
+docker run --rm watcher-mcp:integration
 ```
 
 Para regenerar las demos (graban en un pty dentro del contenedor y renderizan GIF/PNG):
 
 ```bash
-docker build --target demo -t install-mcp:demo .
-docker run --name imcp-demos install-mcp:demo
+docker build --target demo -t watcher-mcp:demo .
+docker run --name imcp-demos watcher-mcp:demo
 docker cp imcp-demos:/out/. docs/demos/
 docker rm imcp-demos
 ```
@@ -306,7 +308,7 @@ también se pueden ejecutar directamente: `python examples/demo.py stall`,
 ## Estructura
 
 ```
-src/install_mcp/
+src/watcher_mcp/
   server.py              tools y recursos MCP, espera acotada con progreso
   jobs.py                núcleo: jobs, cola, límites, watchdog, logs, informe
   process.py             exec sin shell, lectura en vivo (pipe/pty/stdbuf), terminación acotada

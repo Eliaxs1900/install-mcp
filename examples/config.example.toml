@@ -1,7 +1,7 @@
-# Copia a ~/.config/install-mcp/config.toml o pásalo con --config / $INSTALL_MCP_CONFIG.
+# Copia a ~/.config/watcher-mcp/config.toml o pásalo con --config / $WATCHER_MCP_CONFIG.
 
 # Jobs, logs y venvs con nombre.
-# state_dir = "~/.local/state/install-mcp"
+# state_dir = "~/.local/state/watcher-mcp"
 
 # Solo estos backends se pueden usar. Por defecto, todos menos apt (root) y run.
 allowed_backends = ["pip", "git", "download", "binary", "npm", "cargo", "go", "maven", "gradle", "brew", "docker"]

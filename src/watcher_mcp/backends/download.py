@@ -72,7 +72,7 @@ def fetch(
     """Descarga ``url`` en ``dest`` (bloqueante; se llama en un hilo). Devuelve (bytes, sha256)."""
     context = ssl.create_default_context(cafile=ca_bundle) if ca_bundle else ssl.create_default_context()
     opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context), _HttpsOnlyRedirect())
-    req = urllib.request.Request(url, headers={"User-Agent": "install-mcp", "Accept-Encoding": "identity"})
+    req = urllib.request.Request(url, headers={"User-Agent": "watcher-mcp", "Accept-Encoding": "identity"})
     digest = hashlib.sha256()
     with opener.open(req, timeout=timeout_s) as resp:
         final = resp.geturl()

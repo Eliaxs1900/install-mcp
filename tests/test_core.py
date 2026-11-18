@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from install_mcp.jobs import JobError, JobEvent, JobManager, JobState
+from watcher_mcp.jobs import JobError, JobEvent, JobManager, JobState
 
 
 async def test_parallel_jobs(manager: JobManager):
