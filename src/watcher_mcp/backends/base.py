@@ -107,6 +107,13 @@ class Plan:
     # de la configuración del backend, luego el por defecto del backend y luego el global.
     timeout_s: float | None = None
     stall_timeout_s: float | None = None
+    # Variables a copiar por NOMBRE en el entorno de los pasos de comando (el núcleo pone los
+    # valores y los redacta). ``inherit_env``: vienen de la configuración (p. ej. de una regla de
+    # ``run``); se buscan en el entorno del servidor y, si no, en la shell de login; si faltan,
+    # solo se avisa en el log. ``env_from``: las pide la petición; solo del entorno del servidor
+    # y, si faltan, el job se rechaza.
+    inherit_env: list[str] = field(default_factory=list)
+    env_from: list[str] = field(default_factory=list)
 
 
 class Backend(ABC, Generic[P]):
@@ -126,6 +133,15 @@ class Backend(ABC, Generic[P]):
         self.options: dict[str, Any] = config.backend_options(self.name)
 
     # --- descubrimiento -------------------------------------------------
+    @classmethod
+    def enable_snippet(cls) -> str:
+        """TOML extra (además de añadirlo a ``allowed_backends``) para activar el backend."""
+        return ""
+
+    def setup_hint(self) -> str | None:
+        """Si el backend está permitido pero le falta configuración, el TOML que falta."""
+        return None
+
     @classmethod
     def params_schema(cls) -> dict[str, Any]:
         return cls.Params.model_json_schema()
