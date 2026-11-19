@@ -233,6 +233,10 @@ Decisiones:
 - **Fail-open.** El listener solo lanza una tarea en segundo plano y vuelve: no retrasa `finished`
   ni cambia el estado del job. Un fallo (CLI ausente, timeout, código ≠ 0) se anota en el log del
   job y en stderr. Sin identidad no se publica nada y se avisa una vez.
+- **Cierre del servidor.** `shutdown()` cancela los jobs activos y eso emite `finished` con estado
+  `cancelled` (prioridad `normal`): puede publicarse un aviso de una sesión que se está cerrando. El
+  núcleo no distingue esa cancelación de la del usuario; se deja así (el proceso suele salir antes de
+  que termine el subproceso y, si llega, es inofensivo).
 
 ### Recursos
 

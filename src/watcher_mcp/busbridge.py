@@ -216,11 +216,15 @@ class BusBridge:
 
     # --- avisos -----------------------------------------------------------------------
     def _note(self, job: Any, text: str) -> None:
-        """Anota en el log del job. El fichero ya se cerró al terminar: se añade la línea a mano."""
+        """Anota en el log del job. Si el fichero sigue abierto (``stalled``: el job vive), ``add_line``
+        ya lo escribe; si se cerró (``finished``), se añade la línea a mano para que disco y memoria
+        sigan casando (``logs(since_seq)`` cuenta líneas del fichero)."""
         with contextlib.suppress(Exception):
+            was_open = getattr(job, "_fh", None) is not None
             job.add_line("core", f"sessionbus: {text}")
-            with open(job.log_path, "a", encoding="utf-8") as fh:
-                fh.write(job.tail(1)[0].format() + "\n")
+            if not was_open:
+                with open(job.log_path, "a", encoding="utf-8") as fh:
+                    fh.write(job.tail(1)[0].format() + "\n")
 
     def _fail(self, job: Any, text: str) -> None:
         self._note(job, text)

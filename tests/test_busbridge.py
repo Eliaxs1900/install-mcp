@@ -272,3 +272,22 @@ def test_config_validation_and_defaults():
         Config.from_dict({"sessionbus": {"priorities": {"failed": "urgente"}}})
     with pytest.raises(ValueError, match="desconocidas"):
         Config.from_dict({"sessionbus": {"cmd": ["x"]}})
+
+
+async def test_stalled_note_written_once_in_output_log(manager: JobManager, fake_cli, calls_dir):
+    """Con ``stalled`` el job sigue vivo y su log abierto: la línea ``sessionbus:`` sale una sola vez en
+    disco."""
+    cfg = SessionbusConfig(enabled=True, command=[str(fake_cli)], events=["stalled"])
+    bridge = attach(manager, cfg, make_env(calls_dir))
+    job = await manager.submit("fake", {"lines": 3, "pause_s": 1.5, "stall_timeout_s": 0.3})
+    assert await manager.wait(job.id, 20)
+    await bridge.drain()
+    on_disk = job.log_path.read_text().splitlines()
+    assert sum("sessionbus: aviso publicado" in ln for ln in on_disk) == 1
+
+
+async def test_finished_note_written_once_in_output_log(manager: JobManager, fake_cli, calls_dir):
+    bridge = attach(manager, SessionbusConfig(enabled=True, command=[str(fake_cli)]), make_env(calls_dir))
+    job = await run_job(manager, bridge, {"lines": 1})
+    on_disk = job.log_path.read_text().splitlines()
+    assert sum("sessionbus: aviso publicado" in ln for ln in on_disk) == 1
