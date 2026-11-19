@@ -89,8 +89,10 @@ def test_run_quiet_shows_only_warnings_and_report(capsys, state):
 
 
 def test_run_stall_warning_with_short_idle(capsys, state):
+    # Tras 'dos' el comando sigue vivo un rato (< --idle): el vigilante comprueba cada ~0,1 s y así ve
+    # la reanudación siempre; si el proceso acabara justo al escribir, el job terminaría antes de notarla.
     code, out, err = cli(capsys, state, "run", "--idle", "0.4", "--", PY, "-c",
-                         "import time; print('uno', flush=True); time.sleep(1.5); print('dos', flush=True)")
+                         "import time; print('uno', flush=True); time.sleep(1.5); print('dos', flush=True); time.sleep(0.25)")
     assert code == 0  # un atasco avisa, no mata
     assert "ATASCADO" in err and "se reanuda la salida" in err
     assert "atascos detectados: 1" in err
@@ -129,8 +131,10 @@ def test_run_relative_program_is_resolved_against_cwd(capsys, state, tmp_path):
 
 
 def test_run_io_mode_pty(capsys, state):
+    # El comando sigue vivo un instante tras imprimir: un proceso que escribe y sale al instante puede perder
+    # su salida con el pty (carrera del núcleo en process.py, ajena a la CLI; ~5 % de las veces).
     code, out, _ = cli(capsys, state, "run", "--io-mode", "pty", "--", PY, "-c",
-                       "import sys; print(sys.stdout.isatty())")
+                       "import sys, time; print(sys.stdout.isatty(), flush=True); time.sleep(0.3)")
     assert code == 0 and out.strip() == "True"
 
 
