@@ -45,6 +45,13 @@ func_cancel_grace_s = 75
 # Regex extra a redactar en los logs.
 redact_patterns = []
 
+# Variables que se copian por NOMBRE en el entorno de todos los jobs (también por backend o por regla
+# de [backends.run] commands). Se leen del entorno del servidor y, si no están, de la shell de login
+# ($SHELL -lic env, una sola vez). El valor se redacta en logs, status, notificaciones e informe.
+inherit_env = []
+login_shell_env = true
+# login_shell = "/bin/zsh"
+
 # Backends externos: "paquete.modulo:Clase" (además hay que añadirlos a allowed_backends).
 plugins = []
 
@@ -69,8 +76,17 @@ prefer_uv = true
 #                                     añade "~/.local/bin" a allowed_roots para usarla
 
 [backends.run]
-# Programas que `run` puede ejecutar (además hay que añadir "run" a allowed_backends).
+# Programas que `run` puede ejecutar con cualquier argumento (además hay que añadir "run" a
+# allowed_backends). backends() da este fragmento en how_to_enable.
 # programs = ["mvn", "pytest", "make"]
+# Reglas más estrechas: programa + prefijo de argumentos + carpeta. Un elemento que acaba en "/"
+# casa con cualquier argumento que empiece así (sin ".."). inherit_env: solo para esta regla.
+# commands = [
+#   { program = "uv", args_prefix = ["run", "python", "tools/"], cwd_under = "~/Desktop/layout-mcp",
+#     inherit_env = ["GEMINI_API_KEY"] },
+# ]
+# Variables copiadas por nombre en todos los jobs de run (valor redactado en logs y estado).
+# inherit_env = ["GEMINI_API_KEY"]
 # Variables de entorno que puede pasar la petición, además de las básicas (CI, LANG, TZ, NO_COLOR...).
 # Nunca se aceptan PATH, LD_*, DYLD_*... (inyectarían código en los programas permitidos).
 # env_allow = ["MI_VARIABLE"]

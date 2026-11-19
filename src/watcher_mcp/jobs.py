@@ -43,6 +43,7 @@ from typing import IO, Any
 
 from .backends.base import Backend, CommandStep, FuncStep, Plan, ProbeResult, StepContext
 from .config import Config
+from .envsource import EnvSource, check_env_names
 from .process import build_env, run_capture, run_command
 from .security import Redactor
 
@@ -429,6 +430,7 @@ class JobManager:
         self.config = config
         self.registry = dict(registry)
         self.redactor = Redactor(config.redact_patterns)
+        self.env_source = EnvSource(login_shell_env=config.login_shell_env, login_shell=config.login_shell)
         self.jobs: dict[str, Job] = {}
         self.listeners: list[Listener] = []
         self._sem = asyncio.Semaphore(max(1, config.max_parallel))
@@ -525,7 +527,8 @@ class JobManager:
         if name not in self.config.allowed_backends:
             raise JobError(
                 f"Backend {name!r} no permitido. Permitidos: {self.config.allowed_backends} "
-                "(configurable con allowed_backends)"
+                f"(configurable con allowed_backends en {self.config.config_file()}; "
+                "backends() da el fragmento exacto en how_to_enable)"
             )
         if name not in self.registry:
             raise JobError(f"Backend {name!r} no existe. Registrados: {sorted(self.registry)}")
@@ -547,8 +550,67 @@ class JobManager:
                     default_limits=self.limits(backend, Plan("", [])).to_dict(),
                     params_schema=cls.params_schema(),
                 )
+                if (hint := backend.setup_hint()) is not None:
+                    item["how_to_enable"] = self._how_to_enable(hint, add_backend=None)
+            else:
+                item["how_to_enable"] = self._how_to_enable(cls.enable_snippet(), add_backend=name)
             out.append(item)
         return out
+
+    def _how_to_enable(self, snippet: str, *, add_backend: str | None) -> dict[str, Any]:
+        """Dónde y qué hay que escribir en la configuración para activar un backend."""
+        path = self.config.config_file()
+        parts = []
+        if add_backend is not None:
+            names = [*self.config.allowed_backends, add_backend]
+            parts.append("allowed_backends = [" + ", ".join(json.dumps(n) for n in names) + "]")
+        if snippet:
+            parts.append(snippet)
+        return {
+            "config_file": str(path),
+            "config_file_exists": path.exists(),
+            "toml": "\n\n".join(parts),
+            "note": (
+                "Lo edita el usuario, no el agente. Las claves de primer nivel (allowed_backends...) van antes "
+                "de cualquier [tabla]; si la tabla ya existe, fusiona las claves en vez de repetirla. "
+                "Después reinicia el servidor MCP (o la sesión del cliente) para que la lea."
+            ),
+        }
+
+    async def _inherit_env(self, backend: Backend[Any], plan: Plan) -> tuple[dict[str, str], list[str]]:
+        """Copia por nombre las variables de ``inherit_env`` (config global, del backend y del plan)
+        y ``env_from`` (petición) en los pasos de comando, y las declara secretas.
+
+        Devuelve ``(valores heredados, nombres de configuración que no se encontraron)``."""
+        try:
+            configured = [
+                *self.config.inherit_env,
+                *check_env_names(backend.options.get("inherit_env", []), what=f"[backends.{backend.name}] inherit_env"),
+                *check_env_names(plan.inherit_env, what="inherit_env"),
+            ]
+            requested = check_env_names(plan.env_from, what="env_from")
+        except ValueError as exc:
+            raise JobError(str(exc)) from None
+        if not any(isinstance(s, CommandStep) for s in plan.steps) or not (configured or requested):
+            return {}, []
+        found: dict[str, str] = {}
+        missing: list[str] = []
+        if configured:
+            found, missing = await asyncio.to_thread(self.env_source.resolve, configured, login_fallback=True)
+        if requested:
+            req_found, req_missing = self.env_source.resolve(requested, login_fallback=False)
+            if req_missing:
+                raise JobError(
+                    f"env_from: no están en el entorno del servidor MCP: {req_missing}. Añádelas al 'env' con el "
+                    "que el cliente registra watcher-mcp, o lístalas en inherit_env en "
+                    f"{self.config.config_file()} para leerlas también de la shell de login"
+                )
+            found.update(req_found)
+        for step in plan.steps:
+            if isinstance(step, CommandStep):
+                step.env = {**found, **step.env}
+        plan.secrets.extend(v for v in found.values() if v)
+        return found, missing
 
     def limits(self, backend: Backend[Any], plan: Plan) -> Limits:
         """Prioridad: Plan (petición) > [backends.<n>] en config > backend > global."""
@@ -649,6 +711,7 @@ class JobManager:
         plan = backend.plan(spec)
         if any(isinstance(s, CommandStep) and s.privileged for s in plan.steps) and not self.config.allow_privileged:
             raise JobError(f"El plan de {backend_name!r} incluye pasos privilegiados y allow_privileged = false")
+        inherited, inherit_missing = await self._inherit_env(backend, plan)
         limits = self.limits(backend, plan)
         redactor = self.redactor.with_literals(plan.secrets)
         job_id = secrets.token_hex(6)
@@ -660,6 +723,11 @@ class JobManager:
         job.open_log()
         job.add_line("core", f"job {job_id} creado: {job.summary}")
         job.add_line("core", f"límites: {json.dumps(limits.to_dict())}, máximo en cola {self.config.max_queue_s}s")
+        if inherited:
+            job.add_line("core", f"entorno heredado por nombre (valores redactados): {', '.join(sorted(inherited))}")
+        if inherit_missing:
+            job.add_line("core", "AVISO: inherit_env sin valor (ni en el entorno del servidor ni en la shell de "
+                                 f"login): {', '.join(inherit_missing)}")
         job.persist()
         self.jobs[job_id] = job
         if on_created:

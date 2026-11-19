@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-
 # Persistencia (se ejecuta sola), secretos y datos personales en macOS.
 PROTECTED_HOME_PATHS: tuple[str, ...] = (
     "Library/LaunchAgents",
@@ -32,6 +31,10 @@ PROTECTED_HOME_PATHS: tuple[str, ...] = (
     "Library/Group Containers",
     "Library/Application Support/com.apple.*",
 )
+
+
+def default_config_path() -> Path:
+    return Path.home() / ".config" / "watcher-mcp" / "config.toml"
 
 
 def _default_state_dir() -> Path:
@@ -101,8 +104,19 @@ class Config:
     redact_patterns: list[str] = field(default_factory=list)
     # Backends externos a cargar: ``"paquete.modulo:Clase"``.
     plugins: list[str] = field(default_factory=list)
+    # Variables que se copian por nombre en el entorno de TODOS los jobs (también por backend:
+    # ``[backends.run] inherit_env``). Se leen del entorno del servidor y, si no están, de la
+    # shell de login (ver ``login_shell_env``). Sus valores se redactan en logs y estado.
+    inherit_env: list[str] = field(default_factory=list)
+    # Si una variable de ``inherit_env`` no está en el entorno del servidor, leerla de
+    # ``$SHELL -lic env`` (una sola vez, al primer job que la necesite).
+    login_shell_env: bool = True
+    # Shell para lo anterior (por defecto ``$SHELL``, o /bin/zsh en macOS).
+    login_shell: str | None = None
     # Opciones por backend: ``[backends.pip] prefer_uv = true``.
     backends: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Fichero del que se cargó la configuración (o donde se buscaría). No es una clave del TOML.
+    source_path: Path | None = field(default=None, repr=False)
 
     @property
     def jobs_dir(self) -> Path:
@@ -134,30 +148,42 @@ class Config:
             protected_home_dirs=self.protected_home_dirs, protect_dot_paths=self.protect_dot_paths,
         )
 
+    def config_file(self) -> Path:
+        """Fichero de configuración activo, o el que se leería si se crea."""
+        if self.source_path is not None:
+            return self.source_path
+        env = os.environ.get("WATCHER_MCP_CONFIG")
+        return Path(env).expanduser() if env else default_config_path()
+
     @classmethod
     def load(cls, path: str | Path | None = None) -> Config:
         data: dict[str, Any] = {}
         candidate = path or os.environ.get("WATCHER_MCP_CONFIG")
         if candidate is None:
-            default = Path.home() / ".config" / "watcher-mcp" / "config.toml"
+            default = default_config_path()
             candidate = default if default.exists() else None
         if candidate is not None:
             with open(Path(candidate).expanduser(), "rb") as fh:
                 data = tomllib.load(fh)
         cfg = cls.from_dict(data)
+        cfg.source_path = Path(candidate).expanduser().resolve() if candidate is not None else None
         if env_state := os.environ.get("WATCHER_MCP_STATE_DIR"):
             cfg.state_dir = Path(env_state).expanduser()
         return cfg
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Config:
-        known = set(cls.__dataclass_fields__)
+        known = set(cls.__dataclass_fields__) - {"source_path"}
         unknown = set(data) - known
         if unknown:
             raise ValueError(f"Claves de configuración desconocidas: {sorted(unknown)}")
         kwargs = dict(data)
         if "state_dir" in kwargs:
             kwargs["state_dir"] = Path(kwargs["state_dir"]).expanduser()
+        if "inherit_env" in kwargs:
+            from .envsource import check_env_names
+
+            kwargs["inherit_env"] = check_env_names(kwargs["inherit_env"], what="inherit_env")
         if "allowed_roots" in kwargs:
             kwargs["allowed_roots"] = [Path(p).expanduser() for p in kwargs["allowed_roots"]]
         return cls(**kwargs)

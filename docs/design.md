@@ -273,13 +273,45 @@ Agrupados por los focos de interacción habituales de un agente de código:
 | Sistema | **brew** | `formulae`, `casks`, `upgrade` | `brew install --formula -- …` / `--cask`; sin auto-update ni prompts | `brew list --versions` | no (no admite root) | `brew` |
 | Sistema | **apt** | `packages` (`nombre[=versión]`), `update`, `install_recommends` | `apt-get -y -q -o Dpkg::Lock::Timeout=120 update/install`, `DEBIAN_FRONTEND=noninteractive`; `sudo -n` si no es root | `dpkg-query -W` | **sí** | `apt` |
 | Sistema | **docker** | `images`, `platform` | `docker pull [--platform P] -- img` | id de la imagen | no | `docker` |
-| Comandos | **run** | `program` (allowlist `[backends.run] programs`), `args`, `cwd`, `env`, `io_mode`, `ok_exit_codes` | el programa con sus argumentos, sin shell | `<program> --version` | no | — |
+| Comandos | **run** | `program` (allowlist `[backends.run] programs` o reglas `commands`), `args`, `cwd`, `env`, `env_from`, `io_mode`, `ok_exit_codes` | el programa con sus argumentos, sin shell | `<program> --version` | no | — |
 
 Todos aceptan además `job_timeout_s` y `stall_timeout_s`.
 
 **Allowlist por defecto**: todos menos `apt` (necesita root) y `run` (ejecuta programas
 arbitrarios de una lista que hay que configurar). `backends()` informa de si cada uno
 está disponible en la máquina; si falta el ejecutable, `install` lo rechaza al instante.
+Para uno no permitido (o `run` permitido sin programas ni reglas) añade `how_to_enable`:
+`config_file` (el `config.toml` activo: `--config`, `$WATCHER_MCP_CONFIG` o
+`~/.config/watcher-mcp/config.toml`), `config_file_exists` y `toml`, el fragmento exacto
+(`allowed_backends` con el backend añadido y lo propio de cada uno: `[backends.run]` de
+ejemplo, `allow_privileged = true` para apt). El agente se lo enseña al usuario; no edita la
+configuración. Cada backend lo declara con `enable_snippet()` / `setup_hint()`.
+
+**Reglas de `run`**. Se acepta la petición si `program` está en `programs` (cualquier
+argumento, cualquier `cwd` dentro de `allowed_roots`) **o** casa con una regla
+`[backends.run] commands = [{program, args_prefix, cwd_under, inherit_env}]`:
+mismo programa; los primeros argumentos iguales a `args_prefix`, salvo un elemento que
+acaba en `/`, que casa con un argumento que empiece así y no contenga `..`; y el `cwd`
+resuelto bajo `cwd_under`. Si ninguna casa, el error lista cada regla con el motivo
+(`args[2] = 'x.py' no está bajo 'tools/'`, `cwd … no está bajo …`). Así se puede permitir
+`uv run python tools/*.py` en un proyecto sin abrir cualquier `uv run`.
+
+**Variables por nombre** (`inherit_env` / `env_from`). Un secreto no debe ir en los params
+(quedaría en `job.json`). `Plan.inherit_env` y `Plan.env_from` llevan solo nombres y el
+núcleo (`JobManager._inherit_env`) pone los valores en el `env` de cada `CommandStep` y los
+añade a `Plan.secrets`, así que se redactan en todas partes (logs, `status`, `logs`,
+notificaciones, informe). Fuentes (`envsource.py`):
+
+| Origen del nombre | Entorno del servidor | Shell de login | Si falta |
+|---|---|---|---|
+| `inherit_env` global, `[backends.<n>] inherit_env`, regla de `commands` | sí | sí, si `login_shell_env` (por defecto) | aviso en el log |
+| `env_from` (params de `run`) | sí | **no** | job rechazado |
+
+La shell de login se lee con `$SHELL -l -i -c "printf marcador; env -0"` (sin terminal,
+`stdin` nulo, timeout de 15 s, una sola vez por servidor) y solo cuando un nombre configurado
+no está en el entorno del servidor. Que la petición no pueda pedir variables de la shell de
+login evita que una instrucción inyectada saque secretos que el usuario no listó. No se
+heredan `PATH`, `HOME`, `SHELL`, `LD_*`, `DYLD_*`, `PYTHONPATH`…
 
 **Pendiente**: `wsl` (delegar en un backend dentro de una distro con `wsl.exe -d DISTRO --`).
 Las rutas dentro de la distro no encajan con el modelo de raíces permitidas del host, así
@@ -315,7 +347,8 @@ backend `apt` (`binwalk`, `squashfs-tools`, `p7zip-full`), que requiere
    parámetros guardados y en el informe: credenciales en URLs
    (`https://user:pass@` → `https://***@`), `token=`, `password=`, `api_key=`,
    `Authorization:`, tokens con formato conocido (GitHub, GitLab, AWS, Slack, `sk-…`),
-   patrones extra de la configuración y literales concretos que declara cada plan.
+   patrones extra de la configuración y literales concretos que declara cada plan
+   (entre ellos los valores heredados con `inherit_env`/`env_from`).
 7. **Descargas**: solo `https://` (`require_https`) y checksum opcional
    (`Checksum.parse("sha256:…").verify_file()`), obligatorio para binarios sueltos.
 8. **Sin interacción**: `stdin` es `/dev/null`; se fijan `PIP_NO_INPUT`,

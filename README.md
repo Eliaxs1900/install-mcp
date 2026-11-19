@@ -146,8 +146,9 @@ flowchart LR
     tamaño y de número de ficheros;
   - `git` neutraliza la configuración local del repo (hooks, fsmonitor, credential helpers) y no
     actualiza repos que no clonó salvo `trust_existing: true`;
-  - `npm` sin scripts de instalación por defecto; `run` con lista de variables de entorno
-    permitidas;
+  - `npm` sin scripts de instalación por defecto; `run` con allowlist de programas o reglas por
+    prefijo de argumentos y carpeta, y lista de variables de entorno permitidas; los secretos se
+    heredan por nombre (`inherit_env`/`env_from`) y su valor se redacta;
   - solo HTTPS;
   - redacción de tokens y contraseñas en logs, argv, informes y parámetros guardados.
 - **Varias sesiones a la vez**: cada sesión de Claude Code arranca su propio servidor y todos
@@ -230,9 +231,12 @@ Cubren los focos de interacción habituales de un agente de código. Todos acept
 | Sistema | `brew` | Fórmulas y casks sin auto-update ni prompts | `{"formulae": ["binwalk", "p7zip"]}` |
 | Sistema | `apt` | apt-get (Debian/Ubuntu/WSL). **Privilegiado**: requiere `allow_privileged = true` | `{"packages": ["binwalk", "squashfs-tools"]}` |
 | Sistema | `docker` | `docker pull` de imágenes | `{"images": ["python:3.12-slim"]}` |
-| Comandos | `run` | Builds y tests largos con un programa de una allowlist. **Desactivado** por defecto | `{"program": "mvn", "args": ["-B", "verify"], "cwd": "/abs/app"}` |
+| Comandos | `run` | Builds, tests y scripts largos con un programa de una allowlist o una regla `commands`. **Desactivado** por defecto | `{"program": "mvn", "args": ["-B", "verify"], "cwd": "/abs/app"}` |
 
-Por defecto están permitidos todos menos `apt` y `run`. Para activarlos:
+Por defecto están permitidos todos menos `apt` y `run`. `backends()` dice cómo activar uno que no
+lo está: en `how_to_enable` da la ruta del `config.toml` activo (`config_file`, y si existe) y el
+fragmento TOML exacto para pegar (`toml`). Si `run` está permitido pero sin programas ni reglas,
+también lo da. A mano:
 
 ```toml
 allowed_backends = ["pip", "git", "download", "binary", "npm", "cargo", "go", "maven", "gradle",
@@ -240,8 +244,44 @@ allowed_backends = ["pip", "git", "download", "binary", "npm", "cargo", "go", "m
 allow_privileged = true                  # solo si quieres apt (usa `sudo -n`: nunca pide contraseña)
 
 [backends.run]
-programs = ["mvn", "pytest", "make"]     # lo único que `run` puede ejecutar
+programs = ["mvn", "pytest", "make"]     # con cualquier argumento, en cualquier cwd permitido
+# Reglas más estrechas: programa + prefijo de argumentos + carpeta de trabajo.
+commands = [
+  { program = "uv", args_prefix = ["run", "python", "tools/"], cwd_under = "~/Desktop/layout-mcp",
+    inherit_env = ["GEMINI_API_KEY"] },
+]
 ```
+
+#### Reglas de `run`
+
+Una petición se acepta si `program` está en `programs` **o** casa con alguna regla de `commands`:
+
+- `program`: el mismo nombre (en PATH).
+- `args_prefix`: los primeros argumentos deben ser exactamente esos; un elemento que acaba en `/`
+  casa con cualquier argumento que empiece así y no tenga `..` (`"tools/"` admite
+  `tools/gemini_compare.py`, no `tools/../x.py`). Lo que va después del prefijo es libre.
+- `cwd_under`: el `cwd` (resuelto) debe ser esa carpeta o estar dentro. Sigue valiendo además
+  `allowed_roots`.
+- `inherit_env` (opcional): variables que se copian por nombre solo para esa regla.
+
+Si nada casa, el error dice por qué falló cada regla, p. ej.
+`commands[0] = uv run python tools/ (cwd bajo /Users/yo/Desktop/layout-mcp): args[2] = 'evil.py' no está bajo 'tools/'`.
+
+#### Variables de entorno por nombre (secretos)
+
+Para que un job reciba un secreto (`GEMINI_API_KEY`) sin escribir su valor en los params:
+
+- `inherit_env = ["GEMINI_API_KEY"]` en la configuración: global (todos los jobs), por backend
+  (`[backends.run] inherit_env`) o por regla de `commands`. Se copia del entorno del servidor MCP
+  y, si no está ahí, de la shell de login (`$SHELL -lic env`, capturada **una vez** al primer job
+  que la necesita; `login_shell_env = false` lo desactiva, `login_shell` elige otra shell). Si no
+  aparece en ninguno, el job sigue y el log lo avisa.
+- `env_from: ["GEMINI_API_KEY"]` en los params de `run`: la pide la petición, solo del entorno del
+  servidor (p. ej. el `env` con que el cliente registra watcher-mcp). Si falta, el job se rechaza.
+  La shell de login solo se consulta para nombres listados en la configuración.
+
+Los valores se redactan (`***`) en logs, `status`, `logs`, notificaciones, `job.json` y el informe;
+el registro del job guarda solo los nombres. No se aceptan `PATH`, `HOME`, `SHELL`, `LD_*`, `DYLD_*`…
 
 ### Límites
 
@@ -286,7 +326,9 @@ Ver [examples/config.example.toml](examples/config.example.toml):
   espera a que un paso interno cancelado (una descarga) suelte su hilo antes de liberar su lock.
 - Límites: `max_parallel`, `default_wait_s`, `max_wait_s`, `max_queue_s`,
   `default_job_timeout_s`, `default_stall_timeout_s`, `default_io_mode`.
-- `[backends.<nombre>]`: límites e `io_mode` propios de un backend.
+- `[backends.<nombre>]`: límites e `io_mode` propios de un backend (y `inherit_env`).
+- `inherit_env`, `login_shell_env` (`true`), `login_shell`: variables copiadas por nombre en el
+  entorno de los jobs, con el valor redactado (ver [Reglas de `run`](#reglas-de-run)).
 - `plugins`: backends externos, como `"paquete.modulo:Clase"`.
 
 `WATCHER_MCP_STATE_DIR` cambia el directorio de estado (por defecto
