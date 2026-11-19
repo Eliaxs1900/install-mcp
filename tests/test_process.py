@@ -13,7 +13,13 @@ from pathlib import Path
 import pytest
 
 from watcher_mcp import process
-from watcher_mcp.process import MAX_LINE, SERVER_ONLY_ENV, build_env, run_capture, run_command
+from watcher_mcp.backends import Backend, BackendParams, CommandStep, Plan
+from watcher_mcp.config import Config
+from watcher_mcp.jobs import JobManager
+from watcher_mcp.process import (
+    MAX_LINE, SERVER_ONLY_ENV, SERVER_ONLY_PATTERNS, build_env, is_server_only, run_capture, run_command,
+)
+from watcher_mcp.security import Redactor
 
 
 def alive(pid: int) -> bool:
@@ -222,3 +228,200 @@ async def test_job_process_does_not_see_messaging_token(monkeypatch: pytest.Monk
     code = "import os; print(sorted(k for k in os.environ if k.startswith('CLAUDE_CODE_MESSAGING')))"
     _, lines = await run([sys.executable, "-c", code])
     assert ("stdout", "[]") in lines
+
+
+# --- ola 3: tope de las sondas, credenciales por patrón, redacción antes de trocear ---------------------
+async def test_run_capture_legit_probe_of_1mib_works():
+    code, out, _ = await run_capture(
+        [sys.executable, "-c", "import sys; sys.stdout.write('v' * (1 << 20))"], env=build_env({}), timeout_s=30,
+    )
+    assert code == 0 and len(out) == 1 << 20
+
+
+async def test_run_capture_default_cap_is_generous_but_bounded():
+    assert 1 << 20 <= process.MAX_CAPTURE_BYTES <= 16 << 20
+    t0 = time.monotonic()
+    code, out, err = await run_capture(
+        [sys.executable, "-c", FLOOD.format(stream="stdout"), "/dev/null"], env=build_env({}), timeout_s=30,
+    )
+    assert code == -1 and "límite" in err and time.monotonic() - t0 < 10
+
+
+async def test_run_capture_max_bytes_per_call():
+    code, _, err = await run_capture(
+        [sys.executable, "-c", "print('z' * 5000)"], env=build_env({}), max_bytes=1000, timeout_s=30,
+    )
+    assert code == -1 and "1000" in err
+
+
+@pytest.mark.parametrize("name", [
+    "CLAUDE_CODE_SESSION_ACCESS_TOKEN", "CLAUDE_CODE_MESSAGING_TOKEN", "claude_code_oauth_token",
+    "CLAUDE_CODE_FOO_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+])
+def test_credential_patterns_are_server_only(name: str, monkeypatch: pytest.MonkeyPatch):
+    assert is_server_only(name)
+    monkeypatch.setenv(name, "secreto-de-prueba")
+    assert name not in build_env({})
+    assert name in build_env({name: "dado-a-proposito"})  # inherit_env/env a propósito: lo explícito manda
+
+
+@pytest.mark.parametrize("name", [
+    "PATH", "HOME", "HTTPS_PROXY", "GH_TOKEN", "NPM_TOKEN", "HF_TOKEN", "CLAUDE_CODE_HOST_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_OAUTH_SCOPES", "CLAUDE_CODE_ENTRYPOINT",
+])
+def test_ordinary_variables_are_inherited(name: str, monkeypatch: pytest.MonkeyPatch):
+    assert not is_server_only(name)
+    monkeypatch.setenv(name, "v")
+    assert build_env({})[name] == "v"
+
+
+def test_patterns_are_documented_as_a_tuple():
+    assert "ANTHROPIC_*" in SERVER_ONLY_PATTERNS and "CLAUDE_CODE_*TOKEN*" in SERVER_ONLY_PATTERNS
+
+
+SECRET = "ghp_" + "A" * 36
+
+
+async def test_secret_crossing_the_8kib_cut_is_redacted_before_chunking():
+    """Con salto de línea: la línea entera se redacta y luego se trocea."""
+    code = f"print('x' * ({MAX_LINE} - 10) + ' ' + {SECRET!r} + ' ' + 'y' * 100)"
+    lines: list[str] = []
+    res = await run_command([sys.executable, "-c", code], env=build_env({}), cwd=None,
+                            on_line=lambda s, t: lines.append(t) if s == "stdout" else None,
+                            cancel_event=asyncio.Event(), timeout_s=30, redact=Redactor())
+    assert res.exit_code == 0
+    joined = "".join(lines)
+    assert "AAAAAAAAAA" not in joined and "***" in joined and joined.endswith("y" * 100)
+    assert all(len(t) <= MAX_LINE for t in lines)
+
+
+async def test_secret_crossing_the_cut_without_newline_and_across_reads(tmp_path: Path):
+    """Sin salto y llegando en dos lecturas: el trozo con el principio del secreto no sale sin redactar."""
+    code = (
+        "import sys, time\n"
+        f"sys.stdout.write('x' * 8700 + ' ghp_' + 'A' * 10); sys.stdout.flush(); time.sleep(0.5)\n"
+        f"sys.stdout.write('A' * 26 + ' ' + 'y' * 30000); sys.stdout.flush()\n"
+    )
+    lines: list[str] = []
+    await run_command([sys.executable, "-c", code], env=build_env({}), cwd=None,
+                      on_line=lambda s, t: lines.append(t) if s == "stdout" else None,
+                      cancel_event=asyncio.Event(), timeout_s=30, redact=Redactor())
+    joined = "".join(lines)
+    assert "AAAAAAAAAA" not in joined and "***" in joined
+    assert joined.count("y") == 30000 and all(len(t) <= MAX_LINE for t in lines)
+
+
+class LongParams(BackendParams):
+    secret: str
+
+
+class LongLineBackend(Backend[LongParams]):
+    name = "longline"
+    description = "Imprime una línea larga con el secreto justo en el corte de 8 KiB"
+    Params = LongParams
+
+    def plan(self, spec: LongParams) -> Plan:
+        code = f"print('x' * ({MAX_LINE} - 20) + {spec.secret!r} + 'y' * 50)"
+        return Plan(summary="línea larga", steps=[CommandStep("long", [sys.executable, "-c", code])],
+                    secrets=[spec.secret])
+
+
+async def test_job_log_redacts_literal_secret_split_by_the_cut(config):
+    """Camino real: Job.add_line es el on_line y su redactor (con los literales del plan) se usa sin tocar
+    jobs.py. Un literal que no casa con ningún patrón genérico quedaba partido en el corte."""
+    config.allowed_backends = ["longline"]
+    m = JobManager(config, {"longline": LongLineBackend})
+    try:
+        secret = "S3cr3t-" + "Q" * 40
+        job = await m.submit("longline", {"secret": secret})
+        assert await m.wait(job.id, 30)
+        text = "\n".join(ln.text for ln in job.tail(500))
+        assert "QQQQQQQQQQ" not in text and secret not in text and "***" in text
+        assert "QQQQQQQQQQ" not in job.log_path.read_text()
+    finally:
+        await m.shutdown(timeout_s=5)
+
+
+# --- ola 3: run no deja rodear la lista con env_from/env; sonda de pip acotada ------------------------
+PY = Path(sys.executable).name
+
+
+def run_manager(tmp_path: Path, **opts) -> JobManager:
+    from watcher_mcp.backends import BUILTIN
+
+    cfg = Config(state_dir=tmp_path / "state", allowed_backends=["run"], allowed_roots=[tmp_path],
+                 backends={"run": {"programs": [PY], **opts}})
+    return JobManager(cfg, BUILTIN)
+
+
+@pytest.mark.parametrize("name", ["CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_SESSION_ACCESS_TOKEN", "ANTHROPIC_API_KEY"])
+async def test_run_rejects_server_credentials_in_env_from(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str):
+    from watcher_mcp.jobs import JobError
+
+    monkeypatch.setenv(name, "secreto-de-prueba")
+    m = run_manager(tmp_path)
+    try:
+        with pytest.raises(JobError, match="credencial del servidor.*inherit_env"):
+            await m.submit("run", {"program": PY, "args": ["-c", "pass"], "cwd": str(tmp_path), "env_from": [name]})
+    finally:
+        await m.shutdown(timeout_s=5)
+
+
+async def test_run_rejects_server_credentials_in_env(tmp_path: Path):
+    from watcher_mcp.jobs import JobError
+
+    m = run_manager(tmp_path, env_allow=["CLAUDE_CODE_MESSAGING_TOKEN"])
+    try:
+        with pytest.raises(JobError, match="credencial del servidor"):
+            await m.submit("run", {"program": PY, "args": ["-c", "pass"], "cwd": str(tmp_path),
+                                   "env": {"CLAUDE_CODE_MESSAGING_TOKEN": "x"}})
+    finally:
+        await m.shutdown(timeout_s=5)
+
+
+async def test_job_sees_credential_only_via_inherit_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-prueba-0123456789-no-real")
+    code = "import os; print('K', os.environ.get('ANTHROPIC_API_KEY', '<none>'))"
+    texts = {}
+    for label, opts in (("sin", {}), ("con", {"inherit_env": ["ANTHROPIC_API_KEY"]})):
+        (tmp_path / label).mkdir(exist_ok=True)
+        m = run_manager(tmp_path / label, **opts)
+        try:
+            job = await m.submit("run", {"program": PY, "args": ["-c", code], "cwd": str(tmp_path / label)})
+            assert await m.wait(job.id, 30)
+            texts[label] = job.log_path.read_text()
+        finally:
+            await m.shutdown(timeout_s=5)
+    assert "K <none>" in texts["sin"]
+    assert "K ***" in texts["con"] and "sk-prueba" not in texts["con"]  # llega, y redactada
+
+
+async def test_pip_probe_asks_only_for_named_dists(config: Config):
+    from watcher_mcp.backends.base import ProbeResult
+    from watcher_mcp.backends.pip import _PROBE_CODE, PipBackend, PipParams
+
+    backend = PipBackend(config)
+    seen: list[list[str]] = []
+
+    async def probe(argv, env=None, timeout_s=60, cwd=None):
+        seen.append(argv)
+        code, out, err = await run_capture([sys.executable, *argv[1:]], env=build_env({}), timeout_s=30)
+        return ProbeResult(code, out, err)
+
+    spec = PipParams(packages=["PyTest>=8", "no_existe_xyz"])
+    found = await backend.detect_versions(spec, probe)
+    (argv,) = seen
+    assert argv[-2:] == ["pytest", "no-existe-xyz"] and argv[3] == _PROBE_CODE  # nombres canónicos
+    assert set(found) == {"pytest", "no-existe-xyz", "(python)"} and found["no-existe-xyz"] == "NO ENCONTRADO"
+    assert found["pytest"] not in ("NO ENCONTRADO", "?")
+
+
+async def test_pip_probe_output_stays_small_with_a_big_env():
+    """Aunque el venv tenga miles de dists, la sonda solo imprime las pedidas."""
+    from watcher_mcp.backends.pip import _PROBE_CODE
+
+    code, out, _ = await run_capture([sys.executable, "-I", "-c", _PROBE_CODE, "pytest"], env=build_env({}))
+    import json
+
+    data = json.loads(out.strip().splitlines()[-1])
+    assert code == 0 and set(data["dists"]) <= {"pytest"} and len(out) < 500

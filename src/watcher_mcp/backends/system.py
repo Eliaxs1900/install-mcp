@@ -21,6 +21,7 @@ from typing import Any, Literal
 from pydantic import Field
 
 from ..envsource import check_env_names
+from ..process import SERVER_ONLY_ENV, is_server_only
 from .base import Backend, CommandStep, Plan, Probe
 from .common import LimitParams, check_all, existing_dir, is_root
 
@@ -346,6 +347,17 @@ class RunBackend(Backend[RunParams]):
                     "(amplíalas con [backends.run] env_allow)"
                 )
         check_env_names(spec.env_from, what="env_from")
+        for k in spec.env:  # un valor puesto a propósito para esta petición no es del servidor: solo la lista
+            if k.upper() in SERVER_ONLY_ENV:
+                raise ValueError(
+                    f"env: {k!r} es una credencial del servidor MCP que los jobs no heredan; no se acepta como variable"
+                )
+        for k in spec.env_from:
+            if is_server_only(k):
+                raise ValueError(
+                    f"env_from: {k!r} es una credencial del servidor MCP (la app o Anthropic) que los jobs no heredan; "
+                    "solo se puede dar a propósito con inherit_env en la configuración"
+                )
 
     def plan(self, spec: RunParams) -> Plan:
         cwd = existing_dir(spec.cwd, self.config, what="cwd")

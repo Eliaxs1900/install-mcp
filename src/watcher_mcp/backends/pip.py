@@ -37,10 +37,15 @@ _VENV_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _PY_VERSION = re.compile(r"^3(\.\d{1,2}){0,2}$")
 _PY_EXE = re.compile(r"^python3(\.\d{1,2})?t?$")
 
+# Imprime solo las distribuciones pedidas (nombres canónicos en argv): en un venv grande, listarlas
+# todas (miles) pasaría de los megas para nada.
 _PROBE_CODE = (
-    "import json, importlib.metadata as m, sys; "
+    "import json, re, importlib.metadata as m, sys; "
+    "w = set(sys.argv[1:]); "
+    "c = lambda n: re.sub(r'[-_.]+', '-', n).lower(); "
     "print(json.dumps({'python': sys.version.split()[0], "
-    "'dists': {d.metadata['Name']: d.version for d in m.distributions() if d.metadata['Name']}}))"
+    "'dists': {d.metadata['Name']: d.version for d in m.distributions() "
+    "if d.metadata['Name'] and c(d.metadata['Name']) in w}}))"
 )
 
 
@@ -214,7 +219,10 @@ class PipBackend(Backend[PipParams]):
     # --- resultado ---------------------------------------------------------------------
     async def detect_versions(self, spec: PipParams, probe: Probe) -> dict[str, str]:
         py = self.venv_python(self.venv_path(spec))
-        res = await probe([str(py), "-I", "-c", _PROBE_CODE])
+        wanted = [canonical(m.group(1)) for r in spec.packages if (m := _REQ.match(r))]
+        if spec.requirements:
+            wanted += self._names_in_requirements(Path(spec.requirements))
+        res = await probe([str(py), "-I", "-c", _PROBE_CODE, *dict.fromkeys(wanted)])
         if res.exit_code != 0:
             return {}
         try:
@@ -222,9 +230,6 @@ class PipBackend(Backend[PipParams]):
         except (ValueError, IndexError):
             return {}
         dists: dict[str, str] = {canonical(k): v for k, v in data.get("dists", {}).items()}
-        wanted = [canonical(m.group(1)) for r in spec.packages if (m := _REQ.match(r))]
-        if spec.requirements:
-            wanted += self._names_in_requirements(Path(spec.requirements))
         found = {name: dists[name] for name in dict.fromkeys(wanted) if name in dists}
         missing = [n for n in dict.fromkeys(wanted) if n not in dists]
         if missing:

@@ -157,8 +157,9 @@ flowchart LR
     prefijo de argumentos y carpeta, y lista de variables de entorno permitidas; los secretos se
     heredan por nombre (`inherit_env`/`env_from`) y su valor se redacta;
   - los jobs no heredan las credenciales con las que la app habla con el servidor (mensajería entre
-    sesiones, OAuth) ni los datos de la cuenta: un `setup.py` cualquiera no puede leerlas. El resto
-    del entorno (PATH, HOME, proxies…) sí se hereda;
+    sesiones, OAuth, `CLAUDE_CODE_*TOKEN*`, `ANTHROPIC_*`…) ni los datos de la cuenta: un `setup.py`
+    cualquiera no puede leerlas. El resto del entorno (PATH, HOME, proxies, `GH_TOKEN`…) sí se
+    hereda. Para dar una a propósito, `inherit_env` en la configuración; `env_from` no vale;
   - cancelar o agotar el tiempo termina el grupo de procesos y también a los descendientes que se
     habían separado de él (`setsid`);
   - solo HTTPS;
