@@ -44,6 +44,7 @@ CORE = [
     "src/watcher_mcp/envsource.py",
     "src/watcher_mcp/server.py",
     "src/watcher_mcp/notify.py",
+    "src/watcher_mcp/logsummary.py",  # lo usa el informe de cualquier job
     "src/watcher_mcp/__init__.py",
     "src/watcher_mcp/backends/__init__.py",
     "src/watcher_mcp/backends/base.py",
@@ -84,12 +85,15 @@ MAP: dict[str, list[str]] = {
         "tests/test_web_git_run.py", "tests/test_backends.py", "tests/test_revision.py", "tests/test_run_rules_env.py",
     ],
     "src/watcher_mcp/backends/ecosystems.py": ["tests/test_backends.py", "tests/test_revision.py"],
-    "src/watcher_mcp/backends/jvm.py": ["tests/test_backends.py", "tests/test_revision.py"],
+    "src/watcher_mcp/backends/jvm.py": [
+        "tests/test_backends.py", "tests/test_revision.py", "tests/test_issues_4_5.py", "tests/test_report_12_14.py",
+    ],
     "src/watcher_mcp/backends/_template.py": ["tests/test_backends.py"],
     # test_limits importa helpers de test_core.
     "tests/test_core.py": ["tests/test_core.py", "tests/test_limits.py"],
     # test_cli_e2e importa helpers de test_cli.
     "tests/test_cli.py": ["tests/test_cli.py", "tests/test_cli_e2e.py"],
+    "tests/test_report_12_14.py": ["tests/test_report_12_14.py"],
     "tests/test_select_tests.py": ["tests/test_select_tests.py"],
 }
 

@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import inspect
 import json
 import logging
 import os
@@ -41,9 +42,10 @@ from enum import StrEnum
 from pathlib import Path
 from typing import IO, Any
 
-from .backends.base import Backend, CommandStep, FuncStep, Plan, ProbeResult, StepContext
+from .backends.base import Backend, CommandStep, FuncStep, Plan, ProbeResult, ResultContext, StepContext
 from .config import Config
 from .envsource import EnvSource, check_env_names
+from .logsummary import RELEVANT, select_relevant  # noqa: F401 - RELEVANT se reexporta
 from .process import build_env, run_capture, run_command
 from .security import Redactor
 
@@ -68,12 +70,19 @@ class JobState(StrEnum):
 TERMINAL = frozenset({JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED, JobState.TIMED_OUT})
 ACTIVE = frozenset({JobState.RUNNING, JobState.STALLED})
 
-# Líneas que suelen explicar un fallo; se destacan en el informe.
-RELEVANT = re.compile(
-    r"(?i)\b(error|failed|failure|fatal|exception|traceback|denied|not found|no matching|"
-    r"could not|cannot|unable|conflict|timed? ?out|no solution|e:)\b"
-)
 DETECT_TIMEOUT_S = 120.0
+
+
+def _result_info(backend: Backend[Any], spec: Any, ctx: ResultContext) -> dict[str, Any]:
+    """``result_info`` con contexto solo si el backend lo acepta (los de terceros con la firma
+    ``result_info(self, spec)`` siguen funcionando)."""
+    try:
+        params = inspect.signature(backend.result_info).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "context" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return backend.result_info(spec, context=ctx)
+    return backend.result_info(spec)
 
 
 def iso(ts: float | None) -> str | None:
@@ -1066,8 +1075,9 @@ class JobManager:
         ok = job.state == JobState.SUCCEEDED
         dur = job.duration() or 0.0
         summary: dict[str, Any] = {}
+        wide = job.tail(20000)  # una sola lectura para el resumen y para las líneas relevantes
         try:  # resumen propio del backend (tests de Maven/Gradle, descargas...) a partir del log
-            output = [ln.text for ln in job.tail(20000) if ln.stream != "core"]
+            output = [ln.text for ln in wide if ln.stream != "core"]
             summary = backend.summarize(spec, output, ok=ok) or {}
         except Exception as exc:  # un resumen roto no debe impedir el informe
             job.add_line("core", f"aviso: el resumen del backend falló: {exc!r}")
@@ -1089,7 +1099,7 @@ class JobManager:
             headline += f" · {len(job.killed_procs)} hijo(s) ignoraron SIGTERM y se mataron con SIGKILL"
         if job.orphans:
             headline += f" · ATENCIÓN: quedan vivos pid {', '.join(map(str, job.orphans))}"
-        recent = job.tail(400)
+        recent = wide[-400:]
         report: dict[str, Any] = {
             "job_id": job.id,
             "uri": job.uri,
@@ -1110,7 +1120,8 @@ class JobManager:
             "log_file": str(job.log_path),
         }
         with contextlib.suppress(Exception):
-            report["info"] = backend.result_info(spec)
+            report["info"] = _result_info(backend, spec, ResultContext(started_at=job.started_at, ok=ok,
+                                                                        state=str(job.state)))
         report.update(summary.get("report") or {})
         if summary.get("hint"):
             report["hint"] = summary["hint"]
@@ -1121,8 +1132,6 @@ class JobManager:
         if ok:
             report["log_tail"] = [ln.format() for ln in recent[-5:]]
         else:
-            report["relevant_lines"] = [ln.format() for ln in recent if ln.stream != "core" and RELEVANT.search(ln.text)][
-                -20:
-            ]
+            report["relevant_lines"] = [ln.format() for ln in select_relevant(wide)]
             report["log_tail"] = [ln.format() for ln in recent[-25:]]
         return report

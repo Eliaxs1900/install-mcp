@@ -32,7 +32,9 @@ def test_backend_change_runs_only_its_tests():
     assert select(["src/watcher_mcp/backends/git.py"]) == (
         "tests/test_backends.py tests/test_revision.py tests/test_web_git_run.py"
     )
-    assert select(["src/watcher_mcp/backends/jvm.py", "README.md"]) == "tests/test_backends.py tests/test_revision.py"
+    assert select(["src/watcher_mcp/backends/jvm.py", "README.md"]) == (
+        "tests/test_backends.py tests/test_issues_4_5.py tests/test_report_12_14.py tests/test_revision.py"
+    )
 
 
 def test_cli_files_run_the_cli_tests():
@@ -78,7 +80,9 @@ def test_tiers_split_unit_and_e2e():
         "tests/test_backends.py tests/test_revision.py", "tests/test_web_git_run.py"
     )
     assert tiers(["tests/test_pip.py"]) == ("NONE", "tests/test_pip.py")
-    assert tiers(["src/watcher_mcp/backends/jvm.py"]) == ("tests/test_backends.py tests/test_revision.py", "NONE")
+    assert tiers(["src/watcher_mcp/backends/jvm.py"]) == (
+        "tests/test_backends.py tests/test_issues_4_5.py tests/test_report_12_14.py tests/test_revision.py", "NONE"
+    )
     assert tiers(["README.md"]) == ("NONE", "NONE")
     assert tiers(["src/watcher_mcp/jobs.py"]) == ("ALL", "ALL")
 
