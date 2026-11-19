@@ -128,6 +128,9 @@ class Config:
     default_io_mode: str = "pipe"
     # Líneas de log que se guardan en memoria por job (en disco se guarda todo).
     memory_log_lines: int = 5000
+    # Tope de bytes del log (output.log) de cada job en disco. Al superarlo se deja de escribir a
+    # disco y se anota una línea; el job no se mata. 0 = sin tope.
+    max_log_bytes: int = 256 * 1024 * 1024
     # Jobs terminados que se conservan en disco; los más antiguos se borran.
     max_jobs_kept: int = 200
     # Raíces bajo las que los backends pueden escribir (venvs, clones, descargas) y leer
