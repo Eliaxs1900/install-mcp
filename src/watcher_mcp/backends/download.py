@@ -37,7 +37,7 @@ from urllib.parse import unquote, urlsplit
 
 from pydantic import Field
 
-from ..security import Checksum, require_https, url_secrets
+from ..security import Checksum, ensure_safe_member, require_https, url_secrets
 from .base import Backend, FuncStep, Plan, Probe, StepContext
 from .common import LimitParams
 
@@ -421,7 +421,7 @@ class DownloadBackend(Backend[DownloadParams]):
                 try:
                     await asyncio.to_thread(
                         extract, archive, target, strip_components=spec.strip_components, log=ctx.log,
-                        overwrite=spec.overwrite, cancelled=ctx.cancelled, validate=self._member_validator(),
+                        overwrite=spec.overwrite, cancelled=ctx.cancelled, validate=self._member_validator(target),
                         **self._extract_limits(),
                     )
                 finally:
@@ -442,11 +442,16 @@ class DownloadBackend(Backend[DownloadParams]):
             **spec.limits(),
         )
 
-    def _member_validator(self) -> Callable[[Path], object]:
-        """Cada miembro del archivo, ya resuelto, pasa por las mismas raíces y zonas protegidas que ``dest``:
-        un archivo con ``.zshrc``, ``.ssh/authorized_keys``, ``Library/LaunchAgents/x.plist`` o ``.git/hooks/*``
-        no puede escribirlos aunque ``dest`` sea ``~`` o un proyecto."""
-        return lambda path: self.config.safe_path(path, what="miembro del archivo")
+    def _member_validator(self, dest: Path) -> Callable[[Path], object]:
+        """Cada miembro del archivo, ya resuelto, pasa por las raíces y las zonas protegidas (ver
+        ``ensure_safe_member``): un archivo con ``.zshrc``, ``.ssh/authorized_keys``,
+        ``Library/LaunchAgents/x.plist`` o ``.git/hooks/*`` no puede escribirlos aunque ``dest`` sea ``~`` o un
+        proyecto; los ocultos inocuos por debajo de una carpeta de trabajo (``.gitignore``, ``.github/``) sí."""
+        cfg = self.config
+        return lambda path: ensure_safe_member(
+            path, dest, cfg.roots(), protected_home_dirs=cfg.protected_home_dirs,
+            protect_dot_paths=cfg.protect_dot_paths,
+        )
 
     def _extract_limits(self) -> dict[str, int]:
         return {

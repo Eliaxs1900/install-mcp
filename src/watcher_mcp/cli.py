@@ -229,7 +229,8 @@ class CliRunBackend(Backend[CliRunParams]):
         if "/" in program and not os.path.isabs(program):
             # ``./gradlew`` es relativo a --cwd (donde se ejecuta), no al directorio desde el que se lanzó.
             program = os.path.normpath(cwd / program)
-        summary = f"{spec.program} {' '.join(spec.args)[:80]} (en {cwd})"
+        shown = Redactor(self.config.redact_patterns).argv([spec.program, *spec.args])  # ``--password X`` va en dos argumentos
+        summary = f"{' '.join(shown)[:80]} (en {cwd})"
         return Plan(
             summary=summary,
             steps=[CommandStep(Path(spec.program).name, [program, *spec.args], cwd=str(cwd), io_mode=spec.io_mode)],

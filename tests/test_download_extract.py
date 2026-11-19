@@ -88,7 +88,7 @@ async def test_extract_into_home_cannot_write_protected_members(home, tmp_path, 
     config = Config(state_dir=tmp_path / "state", allowed_backends=["download"], allowed_roots=[home])
     job = await run_download(config, archive, home, monkeypatch)  # dest = ~ : permitido por sí mismo
     assert job.state == JobState.FAILED
-    assert "zona protegida" in (job.error or "")
+    assert "pasa por" in (job.error or "") and "componente oculto de HOME" in (job.error or "")
     # Ni el miembro dañino ni los inofensivos: se valida TODO el archivo antes de escribir (en main:
     # .zshrc, .ssh/authorized_keys, LaunchAgents/evil.plist y .git/hooks/post-checkout quedaban escritos).
     assert tree(home) == {}
@@ -103,14 +103,68 @@ async def test_extract_still_works_for_a_clean_archive(home, tmp_path, monkeypat
     assert tree(home / "proyecto") == {"app/main.py": "print(1)", "app/lib/util.py": "x = 1"}
 
 
-def test_member_validator_is_the_same_policy_as_dest(home, tmp_path):
+def test_member_validator_in_home_rejects_every_hidden_member_and_protected_zones(home, tmp_path):
     config = Config(state_dir=tmp_path / "state", allowed_roots=[home])
-    validate = dl.DownloadBackend(config)._member_validator()
-    for bad in (home / ".zshrc", home / ".ssh" / "id_rsa", home / "Library" / "LaunchAgents" / "x.plist",
-                home / "p" / ".git" / "hooks" / "pre-commit", home.parent / "fuera.txt"):
+    validate = dl.DownloadBackend(config)._member_validator(home)  # dest = ~
+    for bad in (home / ".zshrc", home / ".gitconfig", home / ".ssh" / "id_rsa", home / "Library" / "LaunchAgents" / "x.plist",
+                home / "p" / ".git" / "hooks" / "pre-commit", home / "p" / ".gitignore", home.parent / "fuera.txt"):
         with pytest.raises(ValueError):
             validate(bad)
     validate(home / "p" / "src" / "main.py")
+
+
+# --------------------------------------------------------------------------- tarballs con .gitignore (regresión de #98)
+TYPICAL_TARBALL = {
+    "proj-1.0/README.md": b"# proj",
+    "proj-1.0/.gitignore": b"*.pyc",
+    "proj-1.0/.editorconfig": b"root = true",
+    "proj-1.0/.github/workflows/ci.yml": b"on: push",
+    "proj-1.0/.vscode/settings.json": b"{}",
+    "proj-1.0/.env.example": b"KEY=",
+    "proj-1.0/src/a.py": b"x = 1",
+}
+
+
+async def test_a_typical_source_tarball_with_hidden_files_extracts_into_a_work_dir(home, tmp_path, monkeypatch):
+    archive = make_tar(tmp_path / "proj.tar.gz", TYPICAL_TARBALL)
+    config = Config(state_dir=tmp_path / "state", allowed_backends=["download"], allowed_roots=[home])
+    job = await run_download(config, archive, home / "proj", monkeypatch, strip_components=1)
+    assert job.state == JobState.SUCCEEDED, job.error  # en #25 fallaba: «.gitignore» pasaba por una zona protegida
+    assert set(tree(home / "proj")) == {
+        "README.md", ".gitignore", ".editorconfig", ".github/workflows/ci.yml", ".vscode/settings.json",
+        ".env.example", "src/a.py",
+    }
+
+
+async def test_the_same_tarball_is_still_rejected_when_dest_is_home(home, tmp_path, monkeypatch):
+    archive = make_tar(tmp_path / "proj.tar.gz", TYPICAL_TARBALL)
+    config = Config(state_dir=tmp_path / "state", allowed_backends=["download"], allowed_roots=[home])
+    job = await run_download(config, archive, home, monkeypatch, strip_components=1)
+    assert job.state == JobState.FAILED and "componente oculto de HOME" in (job.error or "")
+    assert tree(home) == {}
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        ".git/hooks/post-checkout", ".git/config", ".GIT/Hooks/pre-commit", ".ssh/authorized_keys", ".SSH/id_rsa",
+        ".gnupg/pubring.kbx", ".aws/credentials", ".config/gh/hosts.yml", ".npmrc", ".yarnrc.yml", ".pypirc", ".netrc",
+        ".claude/settings.json", ".claude/hooks/x.sh", "sub/dir/.ssh/id_rsa", "sub/.kube/config",
+    ],
+)
+async def test_sensitive_hidden_members_stay_rejected_inside_a_work_dir(home, tmp_path, monkeypatch, member):
+    archive = make_tar(tmp_path / "evil.tar.gz", {"ok.txt": b"fine", member: b"mal"})
+    config = Config(state_dir=tmp_path / "state", allowed_backends=["download"], allowed_roots=[home])
+    job = await run_download(config, archive, home / "proj", monkeypatch)
+    assert job.state == JobState.FAILED and "zona sensible" in (job.error or "")
+    assert not (home / "proj").exists() or tree(home / "proj") == {}  # todo o nada
+
+
+def test_git_internals_other_than_hooks_and_config_are_allowed(home, tmp_path):
+    config = Config(state_dir=tmp_path / "state", allowed_roots=[home])
+    validate = dl.DownloadBackend(config)._member_validator(home / "proj")
+    validate(home / "proj" / ".git" / "HEAD")
+    validate(home / "proj" / ".github" / "CODEOWNERS")
 
 
 # --------------------------------------------------------------------------- #125: no perder lo que ya había

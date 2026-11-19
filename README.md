@@ -355,7 +355,7 @@ Cubren los focos de interacción habituales de un agente de código. Todos acept
 
 | Foco | Backend | Para qué | Ejemplo de `params` |
 |---|---|---|---|
-| Web | `download` | Fichero por HTTPS, checksum opcional, extracción segura de tar/zip (cada miembro pasa por las zonas protegidas: un archivo con `.gitignore` o `.github/` necesita un destino que sea raíz explícita) | `{"url": "https://…/fw.tar.gz", "dest": "~/fw", "extract": true, "checksum": "sha256:…"}` |
+| Web | `download` | Fichero por HTTPS, checksum opcional, extracción segura de tar/zip (ver [zonas protegidas al extraer](#zonas-protegidas-al-extraer)) | `{"url": "https://…/fw.tar.gz", "dest": "~/fw", "extract": true, "checksum": "sha256:…"}` |
 | Web | `binary` | Ejecutable suelto (checksum **obligatorio**), también dentro de un tar/zip | `{"url": "https://…/jq-linux-arm64", "checksum": "sha256:…", "name": "jq"}` |
 | Código | `pip` | Paquetes Python en un venv aislado (uv si está) | `{"packages": ["pypdf"], "venv": "tools"}` |
 | Código | `git` | Clonar/actualizar (https, ssh, local) sin prompts de credenciales | `{"url": "git@github.com:org/repo.git", "dest": "/abs/repo", "depth": 1}` |
@@ -419,6 +419,17 @@ Para que un job reciba un secreto (`GEMINI_API_KEY`) sin escribir su valor en lo
 Los valores se redactan (`***`) en logs, `status`, `logs`, notificaciones, `job.json` y el informe;
 el registro del job guarda solo los nombres. No se aceptan `PATH`, `HOME`, `SHELL`, `LD_*`, `DYLD_*`…
 
+### Zonas protegidas al extraer
+
+`download` con `extract` valida **todo** el archivo antes de escribir y cada miembro por zonas, no por «cualquier punto»:
+
+- siempre: dentro de las raíces y fuera de `protected_home_dirs` (`Library/LaunchAgents`…);
+- si `dest` es HOME (o un ancestro): ningún componente oculto (`.zshrc`, `.ssh`, `.gitconfig`…);
+- si `dest` es una carpeta de trabajo: los ocultos inocuos de un tarball normal (`.gitignore`,
+  `.github/`, `.editorconfig`, `.vscode/`…) se extraen; se rechazan `.ssh`, `.gnupg`, `.aws`, `.azure`,
+  `.kube`, `.docker`, `.config`, `.netrc`, `.npmrc`, `.pypirc`, `.yarnrc(.yml)`, `.pgpass`, `.my.cnf`,
+  `.claude`, `.git/hooks` y `.git/config` (sin distinguir mayúsculas).
+
 ### Límites
 
 | Qué | Por defecto | Al vencer |
@@ -436,7 +447,7 @@ configuración (`[backends.pip] job_timeout_s = 1800`) o globalmente.
 | Param | Ejemplo | Notas |
 |---|---|---|
 | `packages` | `["pypdf", "requests>=2.32"]` | PEP 508 sin URLs; nada que empiece por `-`. |
-| `requirements` | `"/abs/requirements.txt"` | Alternativa o complemento a `packages`. Dentro de `allowed_roots` y fuera de zonas protegidas (pip/uv copian en su error las líneas que no entienden). Se lee **antes** de lanzar pip, también los que incluye con `-r`/`-c`: solo se admiten requisitos sin URL ni rutas, `--index-url`/`--extra-index-url`/`-f` con https (o un directorio permitido), `-r`/`-c` a ficheros permitidos y los flags habituales (`--no-index`, `--pre`, `--hash=…`…); `-e`, variables `${VAR}` y lo demás se rechazan. |
+| `requirements` | `"/abs/requirements.txt"` | Alternativa o complemento a `packages`. Dentro de `allowed_roots` y fuera de zonas protegidas (pip/uv copian en su error las líneas que no entienden). Justo antes de lanzar pip se lee **una vez** (con lo que incluye por `-r`/`-c`), se normaliza y pip recibe una copia privada (`<state_dir>/requirements/<id>/`), nunca el original: solo se admiten requisitos sin URL ni rutas, `--index-url`/`--extra-index-url`/`-f` con https (o un directorio permitido), `-r`/`-c` a ficheros permitidos y los flags habituales (`--no-index`, `--pre`, `--hash=…`…); `-e`, variables `${VAR}` y lo demás se rechazan. Así un cambio del fichero mientras el job espera en la cola no cuenta. |
 | `venv` | `"tools"` o `"/abs/ruta/.venv"` | Un nombre crea `<state_dir>/venvs/<nombre>`; una ruta debe estar dentro de `allowed_roots`. |
 | `python` | `"3.12"` o `"/abs/python3"` | Versión con uv (o `python3.12` en PATH). Una ruta debe llamarse `python3…`. |
 | `installer` | `"auto"` / `"uv"` / `"pip"` | `auto` = uv si está. |
