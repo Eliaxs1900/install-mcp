@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import hashlib
 import inspect
 import json
 import logging
@@ -71,6 +72,10 @@ TERMINAL = frozenset({JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED, J
 ACTIVE = frozenset({JobState.RUNNING, JobState.STALLED})
 
 DETECT_TIMEOUT_S = 120.0
+FOREIGN_POLL_S = 0.5  # sondeo del disco al esperar un job de otra sesión
+FILE_LOCK_POLL_S = 0.2  # sondeo del lock entre procesos
+# Carpeta de job sin job.json legible y sin actividad desde hace tanto: se borra (retención).
+UNREADABLE_JOB_MAX_AGE_S = 7 * 86400.0
 
 
 def _result_info(backend: Backend[Any], spec: Any, ctx: ResultContext) -> dict[str, Any]:
@@ -169,7 +174,9 @@ class Job:
         memory_lines: int,
         limits: Limits | None = None,
         owner: str | None = None,
+        max_log_bytes: int = 0,
     ) -> None:
+        self.redact = redactor  # primero: ``error`` y ``summary`` se redactan al asignarse
         self.id = job_id
         # Instancia del servidor que lo ejecuta (cada sesión de Claude Code arranca la suya).
         self.owner = owner
@@ -177,7 +184,7 @@ class Job:
         self.foreign = False
         self.backend = backend
         self.params = params
-        self.summary = plan.summary
+        self.summary = redactor(plan.summary)  # puede llevar user:pass@ de una URL
         self.lock_key = plan.lock_key
         self.limits = limits or Limits(None, None, "pipe")
         self.state = JobState.QUEUED
@@ -185,7 +192,7 @@ class Job:
         self.started_at: float | None = None
         self.finished_at: float | None = None
         self.exit_code: int | None = None
-        self.error: str | None = None
+        self._error: str | None = None
         self.installed: dict[str, str] = {}
         self.report: dict[str, Any] | None = None
         self.steps = [StepRecord(s.name) for s in plan.steps]
@@ -202,13 +209,26 @@ class Job:
         self.killed_procs: list[int] = []
         self.orphans: list[int] = []
         self.dir = directory
-        self.redact = redactor
         self._lines: deque[LogLine] = deque(maxlen=memory_lines)
         self._seq = 0
         self._fh: IO[str] | None = None
+        # Tope de bytes del log en disco (0 = sin tope): al superarlo se deja de escribir a disco
+        # (se anota una línea ``core``), pero el job sigue vigilado y la memoria sigue recibiendo líneas.
+        self.max_log_bytes = max_log_bytes
+        self._log_bytes = 0
+        self.log_truncated = False
         self.done = asyncio.Event()
         self.cancel_event = asyncio.Event()
         self.lines_in_step = 0
+
+    @property
+    def error(self) -> str | None:
+        return self._error
+
+    @error.setter
+    def error(self, value: str | None) -> None:
+        # Los mensajes de error pueden citar argumentos o excepciones con secretos.
+        self._error = self.redact(value) if value else value
 
     # --- logs -------------------------------------------------------------
     @property
@@ -233,16 +253,36 @@ class Job:
             self._fh = None
 
     def add_line(self, stream: str, text: str, *, activity: bool | None = None) -> None:
-        """Añade una línea. stdout/stderr (o ``activity=True``) cuentan para el watchdog."""
+        """Añade una línea. stdout/stderr (o ``activity=True``) cuentan para el watchdog.
+
+        Una línea = un evento = una línea física del log y un ``seq``: los saltos de línea del texto
+        (un argumento ``python -c "a\\nb"``, un error multilínea) se escapan; si no, ``seq`` en memoria
+        y las líneas del disco dejarían de coincidir y ``logs(since_seq)`` fallaría."""
         now = time.time()
         self._seq += 1
         if activity if activity is not None else stream != "core":
             self.last_output_at = now
             self.lines_in_step += 1
-        line = LogLine(self._seq, now, stream, self.redact(text))
+        text = self.redact(text).replace("\r", "\\r").replace("\n", "\\n")
+        line = LogLine(self._seq, now, stream, text)
         self._lines.append(line)
         if self._fh:
-            self._fh.write(line.format() + "\n")
+            self._write_line(line)
+
+    def _write_line(self, line: LogLine) -> None:
+        if self.log_truncated:
+            return
+        data = line.format() + "\n"
+        self._log_bytes += len(data.encode("utf-8", errors="replace"))
+        if self.max_log_bytes and self._log_bytes > self.max_log_bytes:
+            self.log_truncated = True
+            assert self._fh is not None
+            self._fh.write(LogLine(line.seq, line.ts, "core",
+                                   f"log truncado en disco: se alcanzó max_log_bytes ({self.max_log_bytes} bytes); "
+                                   "el job sigue en curso y las últimas líneas siguen en memoria").format() + "\n")
+            return
+        assert self._fh is not None
+        self._fh.write(data)
 
     def tail(self, n: int, since_seq: int | None = None, stream: str | None = None) -> list[LogLine]:
         lines: list[LogLine] = list(self._lines)
@@ -336,7 +376,9 @@ class Job:
             d["installed"] = self.installed
         if tail:
             d["log_tail"] = [ln.format() for ln in self.tail(tail)]
-        return d
+        # Un solo punto de salida (status, job.json, notificaciones): nada de lo que se publica
+        # (summary, error, argv, versiones…) sale sin pasar por el redactor.
+        return self.redact.redact_obj(d)
 
     def persist(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -444,6 +486,7 @@ class JobManager:
         self.listeners: list[Listener] = []
         self._sem = asyncio.Semaphore(max(1, config.max_parallel))
         self._locks: dict[str, asyncio.Lock] = {}
+        self._lock_users: dict[str, int] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._backends: dict[str, Backend[Any]] = {}
         # Cada servidor (uno por sesión de Claude Code) comparte state_dir con los demás: se
@@ -646,19 +689,72 @@ class JobManager:
             if d.is_dir() and (job := Job.from_disk(d, self.redactor, self.config.memory_log_lines)):
                 found.append(job)
         for job in sorted(found, key=lambda j: j.created_at):
-            if job.state not in TERMINAL:
-                if job.owner and self.owner_alive(job.owner):
-                    job.foreign = True  # sigue en curso en otra sesión: no se toca
-                else:
-                    self._reap_orphan(job)
-                    job.state = JobState.FAILED
-                    job.error = "interrumpido: el servidor que lo ejecutaba terminó mientras estaba en curso"
-                    job.finished_at = job.finished_at or time.time()
-                    job.add_line("core", job.error)
-                    with contextlib.suppress(OSError):
-                        job.persist()
-                    job.done.set()
-            self.jobs.setdefault(job.id, job)
+            self._adopt(job)
+        self._sweep_unreadable()
+
+    def _adopt(self, job: Job) -> None:
+        """Incorpora un job cargado del disco: los ajenos en curso quedan ``foreign``; si su dueño
+        murió, se recoge el grupo huérfano y se marca como fallido."""
+        if job.state not in TERMINAL:
+            if job.owner and self.owner_alive(job.owner):
+                job.foreign = True  # sigue en curso en otra sesión: no se toca
+            else:
+                self._orphaned(job)
+        self.jobs.setdefault(job.id, job)
+
+    def _orphaned(self, job: Job) -> None:
+        self._reap_orphan(job)
+        job.state = JobState.FAILED
+        job.error = "interrumpido: el servidor que lo ejecutaba terminó mientras estaba en curso"
+        job.finished_at = job.finished_at or time.time()
+        job.add_line("core", job.error)
+        with contextlib.suppress(OSError):
+            job.persist()
+        job.done.set()
+
+    def _sync_foreign(self, job: Job) -> None:
+        """Vuelve a leer del disco un job de otra sesión (``foreign``): si ya terminó allí, se
+        refleja aquí; si su dueño murió, se trata como huérfano. Sin esto quedaría ``running`` siempre."""
+        if not job.foreign:
+            return
+        fresh = Job.from_disk(job.dir, self.redactor, self.config.memory_log_lines)
+        if fresh is None:
+            return
+        for attr in ("state", "exit_code", "_error", "installed", "stalls", "steps", "report", "started_at",
+                     "finished_at", "pid", "pid_started_at", "current_command", "current_step", "_seq", "summary"):
+            setattr(job, attr, getattr(fresh, attr))
+        if job.state in TERMINAL:
+            job.foreign = False
+            job.done.set()
+        elif not (job.owner and self.owner_alive(job.owner)):
+            job.foreign = False
+            self._orphaned(job)
+
+    def _scan_new(self) -> None:
+        """Incorpora los jobs que otras sesiones lanzaron después de arrancar este servidor."""
+        try:
+            names = [d for d in self.config.jobs_dir.iterdir() if d.is_dir() and d.name not in self.jobs]
+        except OSError:
+            return
+        for d in names:
+            if job := Job.from_disk(d, self.redactor, self.config.memory_log_lines):
+                self._adopt(job)
+
+    def _sweep_unreadable(self) -> None:
+        """Borra las carpetas de job sin ``job.json`` legible y sin actividad desde hace días (caída
+        entre ``mkdir`` y ``persist``, versión incompatible): no son jobs conocidos y nunca se podarían."""
+        try:
+            dirs = [d for d in self.config.jobs_dir.iterdir() if d.is_dir() and d.name not in self.jobs]
+        except OSError:
+            return
+        now = time.time()
+        for d in dirs:
+            try:
+                newest = max([d.stat().st_mtime, *(p.stat().st_mtime for p in d.iterdir())])
+            except OSError:
+                continue
+            if now - newest > UNREADABLE_JOB_MAX_AGE_S:
+                shutil.rmtree(d, ignore_errors=True)
 
     def _prune(self) -> None:
         alive: dict[str, bool] = {}
@@ -677,15 +773,25 @@ class JobManager:
         for job in sorted(finished, key=lambda j: j.created_at)[: max(excess, 0)]:
             self.jobs.pop(job.id, None)
             shutil.rmtree(job.dir, ignore_errors=True)
+        self._sweep_unreadable()
 
     # --- consultas --------------------------------------------------------------
     def get(self, job_id: str) -> Job:
-        job = self.jobs.get(job_id.strip().removeprefix("job://"))
+        jid = job_id.strip().removeprefix("job://")
+        job = self.jobs.get(jid)
+        if job is None and re.fullmatch(r"[0-9a-f]{12}", jid):  # lanzado por otra sesión tras arrancar
+            if loaded := Job.from_disk(self.config.jobs_dir / jid, self.redactor, self.config.memory_log_lines):
+                self._adopt(loaded)
+                job = self.jobs.get(jid)
         if job is None:
             raise JobError(f"No existe el job {job_id!r}")
+        self._sync_foreign(job)
         return job
 
     def list(self, state: str | None = None, limit: int = 20) -> list[Job]:
+        self._scan_new()
+        for job in list(self.jobs.values()):
+            self._sync_foreign(job)
         jobs = sorted(self.jobs.values(), key=lambda j: j.created_at, reverse=True)
         if state:
             jobs = [j for j in jobs if j.state == state]
@@ -727,7 +833,7 @@ class JobManager:
         safe_params = redactor.redact_obj(spec.model_dump(mode="json", exclude_none=True))
         job = Job(
             job_id, backend_name, safe_params, plan, self.config.jobs_dir / job_id, redactor,
-            self.config.memory_log_lines, limits, owner=self.instance_id,
+            self.config.memory_log_lines, limits, owner=self.instance_id, max_log_bytes=self.config.max_log_bytes,
         )
         job.open_log()
         job.add_line("core", f"job {job_id} creado: {job.summary}")
@@ -748,8 +854,15 @@ class JobManager:
     async def wait(self, job_id: str, timeout_s: float) -> bool:
         """Espera acotada. Devuelve True si el job terminó. Nunca espera más de ``timeout_s``."""
         job = self.get(job_id)
+        deadline = time.monotonic() + max(timeout_s, 0)
+        while job.foreign:  # de otra sesión: no hay evento local, se sondea el disco
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return job.done.is_set()
+            await asyncio.sleep(min(FOREIGN_POLL_S, remaining))
+            self._sync_foreign(job)
         with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(job.done.wait()), max(timeout_s, 0))
+            await asyncio.wait_for(asyncio.shield(job.done.wait()), max(deadline - time.monotonic(), 0))
         return job.done.is_set()
 
     async def cancel(self, job_id: str) -> Job:
@@ -777,6 +890,9 @@ class JobManager:
 
     # --- ejecución ------------------------------------------------------------------
     async def _emit(self, event: JobEvent) -> None:
+        # Salida hacia los clientes: también el texto del evento (nombres de paso, resúmenes…) se redacta.
+        event.message = event.job.redact(event.message)
+        event.data = event.job.redact.redact_obj(event.data)
         for listener in list(self.listeners):
             try:
                 await asyncio.wait_for(listener(event), self.config.listener_timeout_s)
@@ -799,11 +915,50 @@ class JobManager:
             primitive.release()
         else:
             acq.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await acq
+            except asyncio.CancelledError:
+                # Solo se ignora la cancelación de ``acq``; si cancelan a este job (cierre del
+                # servidor) hay que dejarla pasar.
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise
             if acq.done() and not acq.cancelled():  # lo obtuvo justo al cancelar
                 primitive.release()
         return "cancelled" if job.cancel_event.is_set() else "timeout"
+
+    async def _acquire_file_lock(self, job: Job, key: str, deadline: float) -> tuple[IO[str] | None, str]:
+        """``flock`` por clave en ``<state_dir>/locks``: serializa también entre servidores (sesiones)
+        que comparten ``state_dir`` (mismo venv, mismo clon). Sondeo con ``LOCK_NB`` acotado por
+        ``deadline`` y por la cancelación. Devuelve ``(fichero | None, 'ok' | 'cancelled' | 'timeout')``."""
+        if fcntl is None:
+            return None, "ok"
+        locks = self.config.state_dir / "locks"
+        try:
+            locks.mkdir(parents=True, exist_ok=True)
+            fh = open(locks / f"{hashlib.sha1(key.encode()).hexdigest()}.lock", "a", encoding="utf-8")  # noqa: SIM115
+        except OSError as exc:
+            job.add_line("core", f"aviso: sin lock entre procesos para {key!r}: {exc!r}")
+            return None, "ok"
+        announced = False
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fh, "ok"
+            except BlockingIOError:
+                pass
+            except OSError as exc:
+                fh.close()
+                job.add_line("core", f"aviso: sin lock entre procesos para {key!r}: {exc!r}")
+                return None, "ok"
+            if job.cancel_event.is_set() or time.monotonic() >= deadline:
+                fh.close()
+                return None, "cancelled" if job.cancel_event.is_set() else "timeout"
+            if not announced:
+                announced = True
+                job.add_line("core", f"en cola: {key!r} está en uso por otra sesión del servidor")
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(job.cancel_event.wait(), min(FILE_LOCK_POLL_S, max(deadline - time.monotonic(), 0)))
 
     def _probe(self, job: Job) -> Callable[..., Awaitable[ProbeResult]]:
         async def probe(
@@ -946,15 +1101,42 @@ class JobManager:
             job.add_line("core", job.error)
             return "failed"
 
+    async def _detect(self, job: Job, backend: Backend[Any], spec: Any) -> str:
+        """Sonda de versiones, cancelable y dentro del timeout global (lo vigila el watchdog, que
+        activa ``cancel_event``). 'ok' | 'cancelled' | 'timed_out'."""
+        probe = asyncio.create_task(backend.detect_versions(spec, self._probe(job)))
+        cancel = asyncio.create_task(job.cancel_event.wait())
+        try:
+            await asyncio.wait({probe, cancel}, timeout=DETECT_TIMEOUT_S, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            cancel.cancel()
+        if not probe.done():
+            probe.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await probe
+            if job.cancel_event.is_set():
+                return "timed_out" if job.timed_out_reason else "cancelled"
+            job.add_line("core", f"la detección de versiones superó {DETECT_TIMEOUT_S}s; se omite")
+            return "ok"
+        job.installed = probe.result()
+        if job.cancel_event.is_set():  # cancelado justo al terminar la sonda
+            return "timed_out" if job.timed_out_reason else "cancelled"
+        return "ok"
+
     async def _run(self, job: Job, backend: Backend[Any], spec: Any, plan: Plan) -> None:
         lock = self._locks.setdefault(plan.lock_key, asyncio.Lock()) if plan.lock_key else None
+        if plan.lock_key:
+            self._lock_users[plan.lock_key] = self._lock_users.get(plan.lock_key, 0) + 1
         got_sem = got_lock = False
+        file_lock: IO[str] | None = None
         watchdog: asyncio.Task[None] | None = None
         try:
             queue_deadline = time.monotonic() + self.config.max_queue_s
             outcome = "ok" if lock is None else await self._acquire(job, lock, queue_deadline)
             got_lock = outcome == "ok"
-            if got_lock:
+            if got_lock and plan.lock_key:  # y ahora el de otras sesiones del servidor (mismo state_dir)
+                file_lock, outcome = await self._acquire_file_lock(job, plan.lock_key, queue_deadline)
+            if outcome == "ok":
                 outcome = await self._acquire(job, self._sem, queue_deadline)
                 got_sem = outcome == "ok"
             if outcome != "ok":
@@ -1000,18 +1182,14 @@ class JobManager:
                 rec.state = outcome
                 if outcome != "ok":
                     break
-            watchdog.cancel()
             job.current_step = None
-            job.step_stall_s = None
+            job.step_stall_s = None  # sin paso en curso: el watchdog sigue vigilando solo el tiempo global
             if outcome == "ok" and job.cancel_event.is_set():
                 outcome = "timed_out" if job.timed_out_reason else "cancelled"
             if outcome == "ok":
-                try:
-                    job.installed = await asyncio.wait_for(
-                        backend.detect_versions(spec, self._probe(job)), DETECT_TIMEOUT_S
-                    )
-                except TimeoutError:
-                    job.add_line("core", f"la detección de versiones superó {DETECT_TIMEOUT_S}s; se omite")
+                outcome = await self._detect(job, backend, spec)
+            watchdog.cancel()
+            if outcome == "ok":
                 job.state = JobState.SUCCEEDED
             elif outcome == "timed_out":
                 job.state = JobState.TIMED_OUT
@@ -1033,8 +1211,17 @@ class JobManager:
                 watchdog.cancel()
             if got_sem:
                 self._sem.release()
+            if file_lock is not None:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(file_lock, fcntl.LOCK_UN)  # type: ignore[union-attr]
+                    file_lock.close()
             if got_lock and lock is not None:
                 lock.release()
+            if plan.lock_key:
+                self._lock_users[plan.lock_key] -= 1
+                if self._lock_users[plan.lock_key] <= 0:  # nadie lo usa ni lo espera: no acumular claves
+                    self._lock_users.pop(plan.lock_key, None)
+                    self._locks.pop(plan.lock_key, None)
             await self._finish(job, backend, spec)
 
     async def _finish(self, job: Job, backend: Backend[Any], spec: Any) -> None:
@@ -1050,8 +1237,10 @@ class JobManager:
                         rec.state = "cancelled"
             job.report = self._report(job, backend, spec)
             job.add_line("core", f"job {job.state}: {job.report['headline']}")
-            with contextlib.suppress(OSError):
-                (job.dir / "report.json").write_text(json.dumps(job.report, ensure_ascii=False, indent=2), "utf-8")
+            with contextlib.suppress(OSError):  # tmp + rename: un lector nunca ve un report.json a medias
+                tmp = job.dir / "report.json.tmp"
+                tmp.write_text(json.dumps(job.report, ensure_ascii=False, indent=2), "utf-8")
+                tmp.replace(job.dir / "report.json")
             job.persist()
         except Exception as exc:
             if job.state not in TERMINAL:
@@ -1134,4 +1323,4 @@ class JobManager:
         else:
             report["relevant_lines"] = [ln.format() for ln in select_relevant(wide)]
             report["log_tail"] = [ln.format() for ln in recent[-25:]]
-        return report
+        return job.redact.redact_obj(report)
