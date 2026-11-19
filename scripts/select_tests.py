@@ -74,6 +74,7 @@ NO_TESTS = [
 # Módulos concretos -> tests que los ejercitan.
 MAP: dict[str, list[str]] = {
     "src/watcher_mcp/__main__.py": ["tests/test_server.py"],
+    "src/watcher_mcp/busbridge.py": ["tests/test_busbridge.py"],
     "src/watcher_mcp/backends/pip.py": ["tests/test_pip.py", "tests/test_backends.py", "tests/test_revision.py"],
     "src/watcher_mcp/backends/download.py": [
         "tests/test_web_git_run.py", "tests/test_backends.py", "tests/test_revision.py", "tests/test_network.py",

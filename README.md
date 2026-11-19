@@ -337,6 +337,38 @@ Ver [examples/config.example.toml](examples/config.example.toml):
 `WATCHER_MCP_STATE_DIR` cambia el directorio de estado (por defecto
 `~/.local/state/watcher-mcp`).
 
+### Aviso por sessionbus (opcional)
+
+Claude Code no le enseña al modelo las `notifications/message` de MCP: la sesión que lanzó un job
+no se entera de que terminó hasta que llama a `wait`/`status`. Con
+[sessionbus](https://github.com/Eliaxs1900/sessionbus-mcp) instalado, watcher-mcp puede publicar el
+fin del job en el bus y el hook de sessionbus se lo inyecta a esa sesión. Está **desactivado por
+defecto** y watcher-mcp no depende de sessionbus:
+
+```toml
+[sessionbus]
+enabled = true
+# command = ["/ruta/a/sessionbus"]     # por defecto: `sessionbus` en el PATH o
+#                                      # ~/Desktop/sessionbus-mcp/.venv/bin/sessionbus
+# events = ["finished", "stalled"]     # por defecto solo ["finished"]
+# priorities = { succeeded = "normal", failed = "alerta" }   # ver la tabla de abajo
+```
+
+Qué llega: una trama `info` en `nodo/<sesión que lanzó el job>/jobs/<job_id>` (solo a esa sesión,
+nunca a `todos/**`; caduca en un día), con el titular del informe como resumen (≤ 200 caracteres) y
+en el cuerpo (≤ 16 KB, redactado) el estado, `exit_code`, la duración, el `error`, las
+`relevant_lines`, `log_file` y `job://<id>`. Prioridades por defecto: `normal` si termina bien o se
+cancela, `alerta` si falla, se agota el tiempo o se atasca (`baja` no se inyecta nunca en la sesión,
+solo queda en su bandeja).
+
+Cómo funciona: cada sesión de Claude Code arranca su propio servidor; su
+`CLAUDE_CODE_HOST_SESSION_ID` (o `CLAUDE_CODE_SESSION_ID`) es el nodo del bus. El aviso sale con un
+subproceso `sessionbus publish` (sin shell, `timeout_s` ≤ 5 s, en segundo plano) lanzado **sin esas
+variables** y con `SESSIONBUS_NODE_NAME=watcher-mcp`; el remitente es `cli-watcher-mcp`. (Si
+publicara como la propia sesión, el bus no se lo entregaría a ella.) Si falta el CLI o la identidad,
+se cuelga o falla, el job termina igual y a tiempo: el fallo solo queda en el log del job y en
+stderr (la falta de identidad se dice una sola vez).
+
 ## Pruebas selectivas: puntuales y E2E
 
 Hay dos niveles de prueba:
@@ -414,6 +446,7 @@ src/watcher_mcp/
   logsummary.py          relevant_lines: causa del fallo sin trazas ni texto de ayuda
   process.py             exec sin shell, lectura en vivo (pipe/pty/stdbuf), terminación acotada
   notify.py              eventos -> notifications/message, resources/updated, subscriptions/listen
+  busbridge.py           aviso opcional del fin de job por sessionbus (desactivado por defecto)
   security.py            redacción, https, checksums, raíces permitidas
   config.py              configuración
   backends/base.py       interfaz Backend / Plan / CommandStep / FuncStep
