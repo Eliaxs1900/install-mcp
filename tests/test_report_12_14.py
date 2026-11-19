@@ -259,3 +259,16 @@ def test_result_info_signature_is_backwards_compatible(cfg):
     assert _result_info(_OldBackend(cfg), None, ctx) == {"viejo": True}
     assert _result_info(_NewBackend(cfg), None, ctx) == {"ok": True}
     assert _result_info(_KwBackend(cfg), None, ctx) == {"ctx": 5.0}
+
+
+def test_noise_needs_frame_shape():
+    keep = ["at line 3: syntax error near unexpected token", "at least one dependency failed to resolve"]
+    drop = ["\tat org.apache.maven.DefaultMaven.doExecute(DefaultMaven.java:267)",
+            "[ERROR] \tat java.base/java.lang.Thread.run(Thread.java:840)",
+            "    at Object.<anonymous> (/x.js:1:7)", "    at /x.js:1:7", "    at async main (/x.js:3:1)",
+            "\t... 13 more"]
+    from watcher_mcp.logsummary import is_noise
+
+    assert not any(is_noise(t) for t in keep) and all(is_noise(t) for t in drop)
+    lines = [_line(i, t) for i, t in enumerate(keep)]
+    assert [ln.text for ln in select_relevant(lines)] == keep

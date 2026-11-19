@@ -26,7 +26,8 @@ RELEVANT = re.compile(
 
 # Marcos de traza, líneas "[ERROR]" vacías y texto de ayuda que no explican nada.
 NOISE = re.compile(
-    r"^\s*(?:\[ERROR\]\s*)?(?:at |\.\.\. \d+ more)"
+    # Marco de traza: Java "at pkg.Clase.metodo(Fichero.java:12)", JS "at /x.js:1:7"; no "at line 3: …".
+    r"^\s*(?:\[ERROR\]\s*)?(?:at\s+\S.*(?:\([^)]*\)|:\d+(?::\d+)?)\s*$|\.\.\. \d+ more)"
     r"|^\s*\[ERROR\]\s*$"
     r"|-> \[Help|\[Help \d+\]|Re-run Maven|To see the full stack trace|For more information about the errors"
     r"|^\s*(?:\[ERROR\]\s*)?(?:\* Try:|Run with --stacktrace|Get more help at|> Run with --)"
