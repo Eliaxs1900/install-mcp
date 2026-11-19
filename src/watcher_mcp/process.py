@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import contextlib
+import fnmatch
 import os
 import shutil
 import signal
@@ -36,12 +37,17 @@ TERM_GRACE_S = 5.0
 KILL_GRACE_S = 5.0
 DRAIN_S = 3.0
 # Tope de cada flujo (stdout y stderr) en ``run_capture`` (sondas de versión): al pasarlo se mata.
-MAX_CAPTURE_BYTES = 64 * 1024
+# Generoso (una sonda legítima, como ``npm ls --json`` de un proyecto grande, pasa de 64 KiB) pero
+# acotado: ``yes --version`` se corta en milisegundos. Se puede cambiar por llamada (``max_bytes``).
+MAX_CAPTURE_BYTES = 4 * 1024 * 1024
+# Una línea sin terminar se emite troceada al pasar de MAX_LINE; se retienen estos caracteres de más
+# para que un secreto que cruza el corte se redacte entero antes de salir (ver ``_pump``).
+HOLD_BACK = 512
 
 # Variables del servidor que los jobs NO heredan: credenciales con las que Claude Code deja que el
 # servidor MCP hable con la app (mensajería entre sesiones, OAuth) y datos personales de la cuenta.
 # Ningún instalador las necesita y un ``setup.py``/script cualquiera las leería. Se puede dar una a
-# propósito con ``inherit_env`` o ``env`` del backend (``extra`` de ``build_env`` manda). El resto de
+# propósito con ``inherit_env`` de la configuración (``extra`` de ``build_env`` manda). El resto de
 # ``CLAUDE_CODE_*`` (ids de sesión, flags) y PATH, HOME, proxies, etc. se mantienen.
 SERVER_ONLY_ENV: tuple[str, ...] = (
     "CLAUDE_CODE_MESSAGING_TOKEN",
@@ -52,6 +58,23 @@ SERVER_ONLY_ENV: tuple[str, ...] = (
     "CLAUDE_CODE_ORGANIZATION_UUID",
     "CLAUDE_CODE_USER_EMAIL",
 )
+# Además de la lista, estos patrones (sobre el nombre en mayúsculas) cubren credenciales de la app y de
+# Anthropic que no se conocen de antemano (``CLAUDE_CODE_SESSION_ACCESS_TOKEN``, ``ANTHROPIC_API_KEY``,
+# ``ANTHROPIC_AUTH_TOKEN``...). No hay un ``*_TOKEN`` genérico: ``GH_TOKEN``, ``NPM_TOKEN``, ``HF_TOKEN``
+# son las que git, npm o pip pueden necesitar de verdad y sus dueños deben decidirlo con ``inherit_env``.
+SERVER_ONLY_PATTERNS: tuple[str, ...] = (
+    "CLAUDE_CODE_*TOKEN*",
+    "CLAUDE_CODE_*SECRET*",
+    "CLAUDE_CODE_*API_KEY*",
+    "CLAUDE_CODE_*CREDENTIAL*",
+    "ANTHROPIC_*",
+)
+
+
+def is_server_only(name: str) -> bool:
+    """¿Es una variable que los jobs no heredan del servidor (lista o patrón)?"""
+    upper = name.upper()
+    return upper in SERVER_ONLY_ENV or any(fnmatch.fnmatchcase(upper, pat) for pat in SERVER_ONLY_PATTERNS)
 
 
 @dataclass
@@ -73,7 +96,9 @@ class ProcResult:
 
 def build_env(extra: Mapping[str, str], remove: tuple[str, ...] = ()) -> dict[str, str]:
     env = dict(os.environ)
-    for key in (*SERVER_ONLY_ENV, *remove):
+    for key in [k for k in env if is_server_only(k)]:
+        env.pop(key)
+    for key in remove:
         env.pop(key, None)
     # Salida sin buffering y sin colores ni prompts interactivos, para cualquier herramienta.
     env.setdefault("PYTHONUNBUFFERED", "1")
@@ -87,7 +112,23 @@ def stdbuf_path() -> str | None:
     return shutil.which("stdbuf") or shutil.which("gstdbuf")
 
 
-async def _pump(stream: asyncio.StreamReader, name: str, on_line: Callable[[str, str], None]) -> None:
+def _line_redactor(on_line: Callable[[str, str], None]) -> Callable[[str], str] | None:
+    """El redactor del dueño de ``on_line`` si es un método (``Job.add_line`` -> ``Job.redact``)."""
+    redact = getattr(getattr(on_line, "__self__", None), "redact", None)
+    return redact if callable(redact) else None
+
+
+async def _pump(
+    stream: asyncio.StreamReader, name: str, on_line: Callable[[str, str], None],
+    redact: Callable[[str], str] | None = None,
+) -> None:
+    """Lee ``stream`` y emite líneas (cortadas por ``\\n`` y ``\\r``; las de más de ``MAX_LINE`` en trozos).
+
+    Si hay redactor (``redact`` o el del objeto de ``on_line``), se aplica a la línea ENTERA antes de
+    trocearla: un secreto que cruza el corte de 8 KiB no puede quedar partido en dos trozos que ya no
+    casan con los patrones.
+    """
+    redact = redact or _line_redactor(on_line) or (lambda text: text)
     buf = ""
     # Decodificador incremental: un carácter multibyte partido entre dos lecturas (á, ñ, emojis)
     # se completa con la siguiente en vez de salir como "��".
@@ -106,13 +147,16 @@ async def _pump(stream: asyncio.StreamReader, name: str, on_line: Callable[[str,
                 break
             line, buf = buf[:idx], buf[idx + 1 :]
             if line.strip():
-                _emit_chunks(on_line, name, line)
-        while len(buf) > MAX_LINE:  # línea gigantesca sin salto: se emite troceada
+                _emit_chunks(on_line, name, redact(line))
+        while len(buf) > MAX_LINE + HOLD_BACK:  # línea gigantesca sin salto: se emite troceada
+            buf = redact(buf)  # entera; lo que se queda (el final, que aún puede crecer) ya va redactado
+            if len(buf) <= MAX_LINE + HOLD_BACK:
+                break
             on_line(name, buf[:MAX_LINE])
             buf = buf[MAX_LINE:]
     buf += decoder.decode(b"", final=True)
     if buf.strip():
-        _emit_chunks(on_line, name, buf)
+        _emit_chunks(on_line, name, redact(buf))
 
 
 def _emit_chunks(on_line: Callable[[str, str], None], name: str, line: str) -> None:
@@ -159,6 +203,7 @@ async def run_command(
     timeout_s: float | None,
     on_start: Callable[[int], None] | None = None,
     io_mode: str = "pipe",
+    redact: Callable[[str], str] | None = None,
 ) -> ProcResult:
     argv = list(argv)
     if io_mode == "stdbuf":
@@ -202,8 +247,8 @@ async def run_command(
         assert proc.stdout is not None
         out_reader = proc.stdout
     pumps = [
-        asyncio.create_task(_pump(out_reader, "stdout", on_line)),
-        asyncio.create_task(_pump(proc.stderr, "stderr", on_line)),
+        asyncio.create_task(_pump(out_reader, "stdout", on_line, redact)),
+        asyncio.create_task(_pump(proc.stderr, "stderr", on_line, redact)),
     ]
     # No se usa proc.wait(): desde Python 3.12 no vuelve hasta que se cierran también las
     # tuberías, así que un hijo que siga vivo con nuestra stdout abierta lo dejaría colgado
@@ -416,10 +461,13 @@ async def _read_capped(stream: asyncio.StreamReader, limit: int, over: asyncio.E
 
 
 async def run_capture(
-    argv: list[str], *, env: Mapping[str, str], cwd: str | None = None, timeout_s: float = 60
+    argv: list[str], *, env: Mapping[str, str], cwd: str | None = None, timeout_s: float = 60,
+    max_bytes: int | None = None,
 ) -> tuple[int, str, str]:
     """Ejecuta un comando corto capturando su salida (sondas de versión). Acotado por timeout y por
-    ``MAX_CAPTURE_BYTES`` por flujo: un programa que imprime sin parar se mata en vez de llenar la memoria."""
+    ``max_bytes`` (por defecto ``MAX_CAPTURE_BYTES``) por flujo: un programa que imprime sin parar se
+    mata en vez de llenar la memoria."""
+    limit = MAX_CAPTURE_BYTES if max_bytes is None else max_bytes
     proc = await asyncio.create_subprocess_exec(
         *argv,
         stdin=asyncio.subprocess.DEVNULL,
@@ -431,7 +479,7 @@ async def run_capture(
     )
     assert proc.stdout is not None and proc.stderr is not None
     over = asyncio.Event()
-    readers = [asyncio.create_task(_read_capped(s, MAX_CAPTURE_BYTES, over)) for s in (proc.stdout, proc.stderr)]
+    readers = [asyncio.create_task(_read_capped(s, limit, over)) for s in (proc.stdout, proc.stderr)]
     everything = asyncio.ensure_future(asyncio.gather(*readers))
     overflow = asyncio.create_task(over.wait())
     try:
@@ -441,7 +489,7 @@ async def run_capture(
             await asyncio.wait_for(_exited(proc), KILL_GRACE_S)
             return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
         failure = (
-            f"la salida superó el límite de {MAX_CAPTURE_BYTES} bytes; se cortó" if overflow in done
+            f"la salida superó el límite de {limit} bytes; se cortó" if overflow in done
             else f"timeout tras {timeout_s}s"
         )
         _signal_group(proc.pid, signal.SIGKILL)

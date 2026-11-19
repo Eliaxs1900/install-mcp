@@ -513,23 +513,33 @@ backend `apt` (`binwalk`, `squashfs-tools`, `p7zip-full`), que requiere
 9. **Límites** (§4): timeout global por job, por paso y en cola, watchdog de atasco,
    espera acotada con tope duro, `max_parallel`, cancelación del grupo de procesos
    completo con SIGTERM y luego SIGKILL.
-10. **Entorno de los jobs**: se copia el del servidor **menos** una lista explícita
-    (`SERVER_ONLY_ENV` en `process.py`): `CLAUDE_CODE_MESSAGING_TOKEN` y
-    `CLAUDE_CODE_MESSAGING_SOCKET` (credenciales con las que la app deja al servidor mensajear
-    entre sesiones), `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` y los datos de la
-    cuenta (`CLAUDE_CODE_ACCOUNT_UUID`, `CLAUDE_CODE_ORGANIZATION_UUID`, `CLAUDE_CODE_USER_EMAIL`).
-    Sin esto, un `setup.py` de pip o un programa de `run` las leería. Se mantienen PATH, HOME, los
-    proxies y el resto de `CLAUDE_CODE_*` (p. ej. los ids de sesión). Para dar una a propósito:
-    `inherit_env` o `env` del backend (lo explícito manda). Lo mismo vale para las sondas de versión.
+10. **Entorno de los jobs**: se copia el del servidor **menos** las credenciales de la app y de
+    Anthropic, que ningún instalador necesita y que un `setup.py` de pip o un programa de `run`
+    leería. Criterio (en `process.py`): la lista `SERVER_ONLY_ENV` (`CLAUDE_CODE_MESSAGING_TOKEN` y
+    `_SOCKET`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` y los datos de la cuenta:
+    `CLAUDE_CODE_ACCOUNT_UUID`, `_ORGANIZATION_UUID`, `_USER_EMAIL`) **más** los patrones de
+    `SERVER_ONLY_PATTERNS` sobre el nombre en mayúsculas: `CLAUDE_CODE_*TOKEN*`, `*SECRET*`,
+    `*API_KEY*`, `*CREDENTIAL*` y `ANTHROPIC_*` (`CLAUDE_CODE_SESSION_ACCESS_TOKEN`,
+    `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`…). No hay un `*_TOKEN` genérico a propósito:
+    `GH_TOKEN`, `NPM_TOKEN` o `HF_TOKEN` pueden hacer falta a git, npm o pip y su dueño decide si
+    las comparte. Se mantienen PATH, HOME, los proxies y el resto de `CLAUDE_CODE_*` (p. ej. los ids
+    de sesión). Para dar una a propósito: `inherit_env` en la configuración (lo explícito manda en
+    `build_env`). Los params de `run` no pueden rodearlo: `env_from` rechaza esos nombres y `env`
+    rechaza los de la lista. Vale también para las sondas de versión.
 11. **Procesos fuera del grupo**: al cancelar o agotar el tiempo, antes de señalar se fotografía el
     árbol de descendientes (`ps`) y, tras el barrido del grupo, se termina (SIGTERM, gracia,
     SIGKILL) a los que habían hecho `setsid`/creado su grupo (servidores de desarrollo, daemons de
     build): se anota en el log del job y, si ni SIGKILL los mata, salen en `orphans`. Límites: un
     proceso que ya se había desvinculado de su padre (doble `fork`) no aparece en el árbol y no se
     puede atribuir de forma fiable; con el job terminado con éxito no se toca a nadie.
-12. **Salida acotada**: las sondas de versión (`run_capture`) leen como mucho
-    `MAX_CAPTURE_BYTES` (64 KiB) por flujo; al pasarlo se mata el grupo y la sonda falla (un
-    programa que imprima sin parar no llena la memoria).
+12. **Salida acotada**: las sondas de versión (`run_capture`) leen como mucho `MAX_CAPTURE_BYTES`
+    (4 MiB; `max_bytes` por llamada) por flujo; al pasarlo se mata el grupo y la sonda falla (un
+    programa que imprima sin parar no llena la memoria). La sonda de `pip` pide solo los paquetes
+    instalados que el job nombra, no todas las distribuciones del venv.
+13. **Redactar antes de trocear**: una línea de más de 8 KiB se redacta entera y después se trocea,
+    para que un secreto que cruza el corte no quede partido en dos trozos que ya no casan con
+    ningún patrón. Si la línea aún no ha terminado, se retienen 512 caracteres de más antes de
+    emitir.
 
 Lo que **no** cubre el prototipo: aislamiento del sistema de ficheros (sandbox),
 límites de CPU/memoria. El `requirements.txt` se valida antes de lanzar pip (solo requisitos
