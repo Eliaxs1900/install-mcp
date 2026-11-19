@@ -35,6 +35,15 @@ def test_backend_change_runs_only_its_tests():
     assert select(["src/watcher_mcp/backends/jvm.py", "README.md"]) == "tests/test_backends.py tests/test_revision.py"
 
 
+def test_cli_files_run_the_cli_tests():
+    assert select(["src/watcher_mcp/cli.py"]) == "tests/test_cli.py tests/test_cli_e2e.py tests/test_doctor.py"
+    assert select(["src/watcher_mcp/doctor.py"]) == "tests/test_cli.py tests/test_cli_e2e.py tests/test_doctor.py"
+    assert select(["tests/test_cli.py"]) == "tests/test_cli.py tests/test_cli_e2e.py"  # test_cli_e2e importa de él
+    assert select_tests.select_tiers(["src/watcher_mcp/cli.py"]) == (
+        "tests/test_cli.py tests/test_doctor.py", "tests/test_cli_e2e.py"
+    )
+
+
 def test_changed_test_runs_itself_and_dependants():
     assert select(["tests/test_pip.py"]) == "tests/test_pip.py"
     assert select(["tests/test_core.py"]) == "tests/test_core.py tests/test_limits.py"

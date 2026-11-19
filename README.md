@@ -194,7 +194,130 @@ O solo para un proyecto, con un `.mcp.json` en su raíz:
 ```
 
 `args` es opcional; sin `--config` se usa `~/.config/watcher-mcp/config.toml` si existe.
-Comprueba que conecta con `claude mcp list`.
+Comprueba que conecta con `claude mcp list` (o con `watcher-mcp doctor`).
+
+### Migración desde `install-mcp`
+
+El proyecto se llamaba `install-mcp`. Si tienes un registro antiguo (`claude mcp list` muestra
+`install-mcp`), o un cliente cuyo JSON apunta a `…/bin/install-mcp`:
+
+1. `watcher-mcp doctor` te dice qué registros están rotos o obsoletos y el comando exacto para
+   arreglarlos. A mano: `claude mcp remove install-mcp -s user` y
+   `claude mcp add --scope user watcher-mcp -- "$PWD/.venv/bin/watcher-mcp"` (cambia `-s user`
+   si lo registraste en otro ámbito; en Claude Desktop, edita `command` en
+   `claude_desktop_config.json`).
+2. **Reinicia las sesiones ya abiertas** de Claude Code (y Claude Desktop): los clientes conectan
+   los servidores MCP solo al arrancar la sesión. Una sesión abierta con un registro roto no
+   recupera las tools aunque luego lo arregles; mientras tanto, [el modo CLI](#modo-cli) funciona.
+3. Al instalar watcher-mcp en ese mismo entorno, el comando `install-mcp` pasa a ser un **alias de
+   transición** (durante una o dos versiones): avisa por stderr con el comando exacto para volver a
+   registrarlo y después sirve con normalidad, para no tumbar las sesiones abiertas. Si el paquete
+   antiguo se desinstaló sin instalar este, el script viejo ya no puede importarlo y el cliente solo
+   ve `CONNECTION_CLOSED`: ahí `watcher-mcp doctor` es lo que lo explica.
+
+## Modo CLI
+
+Para cuando el cliente MCP no tiene cargado el servidor (una sesión abierta antes de registrarlo
+no recarga sus servidores MCP), `watcher-mcp` también funciona como comando de consola sobre el
+**mismo núcleo**: mismos límites, mismo `io_mode`, misma escalada SIGTERM → SIGKILL sobre el grupo
+de procesos y el mismo log en el `state_dir`. Un agente o una persona sigue teniendo detección de
+atascos y timeouts con un comando de Bash, en vez de un `timeout`/`perl alarm` que no mata el árbol
+de procesos ni deja log.
+
+```bash
+watcher-mcp run --idle 120 --timeout 900 --cwd ./proyecto -- mvn -o -B test
+watcher-mcp list
+watcher-mcp status 3f9a1c            # un prefijo único del id basta
+watcher-mcp logs 3f9a1c --tail 100
+watcher-mcp doctor
+```
+
+### `run`
+
+```
+watcher-mcp run [--idle S] [--timeout S] [--cwd DIR] [--io-mode pipe|pty|stdbuf]
+                [--quiet] [--json] [--strict] [--config F] [--state-dir D] -- cmd args…
+```
+
+- El comando va **tras `--`** y se ejecuta sin shell (nunca `shell=True`). Un programa con `/`
+  (`./gradlew`) es relativo a `--cwd`.
+- `--idle S`: segundos sin salida para avisar de atasco (`stall_timeout_s`); `--timeout S`: tiempo
+  máximo (`job_timeout_s`). Sin ellos valen los de la configuración (300 s y 3600 s). `0` desactiva
+  el vigilante, y el timeout sigue acotado por el tope duro `max_job_timeout_s`. Un atasco **avisa**
+  (`stalled`), no mata: lo que acota el tiempo es `--timeout`.
+- La salida va en vivo: stdout del comando a stdout y stderr a stderr, así que se puede encadenar
+  con pipes. Con `--quiet` solo salen los avisos de atasco. Los avisos y el informe final (titular,
+  duración, ruta del log y, si falla, las líneas relevantes) van a stderr. Con `--json`, stdout es
+  solo el informe en JSON (con `cli_exit_code`) y la salida en vivo pasa a stderr.
+- **Ctrl-C** (o SIGTERM al propio `watcher-mcp`) cancela el job: SIGTERM al grupo de procesos y,
+  pasado un plazo acotado, SIGKILL. Una segunda señal salta directamente al SIGKILL.
+- El job queda en `<state_dir>/jobs/<id>/` como cualquier otro: `status`, `logs` y `list` (y las
+  tools `status`/`logs`/`list_jobs` de un servidor MCP que use ese `state_dir`) lo ven después.
+
+Códigos de salida:
+
+| Código | Significado |
+|---|---|
+| `0` | el comando terminó bien |
+| el del comando | el comando falló (si lo mató una señal N, `128+N`) |
+| `124` | tiempo agotado (`--timeout`), como `timeout(1)` |
+| `130` | cancelado (Ctrl-C o SIGTERM) |
+| `127` / `126` | el programa no existe / no es ejecutable |
+| `2` | error de uso o de configuración |
+
+Un comando puede devolver 124 o 130 por su cuenta; si importa distinguirlo, `--json` da el estado
+(`state`: `timed_out`, `cancelled`, `failed`…).
+
+### `status`, `logs` y `list`
+
+Leen el `state_dir` en **solo lectura**: no reclaman jobs huérfanos ni borran nada (eso lo hace el
+servidor al arrancar). Un job en curso en otro servidor o `run` vivo se muestra como en curso y de
+solo lectura (marcado con `*` en `list`); si su proceso murió de golpe, se muestra como
+interrumpido. `status` y `list` aceptan `--json`; `logs` acepta `--tail N` y `--stream`.
+
+### Seguridad: `run` de la CLI no aplica la allowlist
+
+`[backends.run]` (programas permitidos, reglas `commands`) y `allowed_roots` protegen al servidor
+MCP frente a **un agente que pide ejecutar cosas** sin que nadie lo vea. `watcher-mcp run` lo lanza
+una persona o un agente desde su shell, y esa shell ya pasa por sus propios permisos (en Claude
+Code, las reglas de `Bash(...)`). Por eso la CLI **no** aplica esa allowlist por defecto: exigir
+una configuración previa dejaría la CLI inútil justo cuando no hay servidor MCP. Lo que sí
+mantiene: nunca usa shell, redacta secretos en logs e informe, respeta `inherit_env`, y los
+límites de tiempo y el tope duro.
+
+Consecuencia que conviene conocer: **una regla de permisos como `Bash(watcher-mcp run *)` deja
+ejecutar cualquier comando**, igual que `Bash(bash *)`. Si lo permites, es una autorización
+completa. Para acotarla, usa reglas más estrechas (`Bash(watcher-mcp run --idle 120 -- mvn *)`) o
+`--strict`, que aplica la misma allowlist que el servidor: solo `programs` y `commands` de
+`[backends.run]` y solo `cwd` dentro de `allowed_roots` (y fuera de las zonas protegidas), con los
+mismos mensajes de error. Con `--strict`, el programa debe ser un nombre en PATH (no una ruta).
+
+## Diagnóstico: `watcher-mcp doctor`
+
+```bash
+watcher-mcp doctor [--config F] [--state-dir D] [--json] [--no-server] [--no-clients]
+```
+
+Comprueba y, por cada problema, imprime un mensaje accionable (`arreglo: …`); sale con código
+distinto de 0 si hay algún `FALLO` (los `AVISO` no cuentan):
+
+- **servidor**: se lanza a sí mismo por stdio (con un `state_dir` temporal, así que no toca el real)
+  y espera la respuesta a `initialize`, con timeout acotado;
+- **configuración**: TOML válido, sin claves desconocidas, reglas `[backends.run]` correctas,
+  plugins importables y `allowed_backends` que existan;
+- **`allowed_roots`**: existen y no caen en zonas protegidas (`~/Library/LaunchAgents`,
+  `Keychains`…: fallo; componentes ocultos como `~/.local/bin`: aviso, porque suele ser a propósito);
+- **`state_dir`**: escribible (sin crearlo);
+- **backends**: cuáles están permitidos y disponibles;
+- **registros de clientes**: si existe `claude`, lee `claude mcp list` (timeout de 30 s; si no
+  está, se salta) y el JSON de Claude Desktop (`--claude-desktop-config` para otra ruta), y marca
+  los registros de watcher-mcp/install-mcp que apuntan a un ejecutable que no existe, a un módulo
+  que ya no se puede importar, que no conectan o que siguen usando el nombre `install-mcp`.
+
+**No modifica ningún registro ni configuración**: solo lee y escribe en la salida el comando que
+debes ejecutar (p. ej. `claude mcp remove install-mcp -s user && claude mcp add --scope user
+watcher-mcp -- /ruta/.venv/bin/watcher-mcp`). `--no-server` y `--no-clients` omiten esas dos
+comprobaciones (útil en CI).
 
 ## Tools
 
@@ -407,6 +530,8 @@ también se pueden ejecutar directamente: `python examples/demo.py stall`,
 ```
 src/watcher_mcp/
   server.py              tools y recursos MCP, espera acotada con progreso
+  cli.py                 modo CLI: run, status, logs, list (mismo núcleo, sin cliente MCP)
+  doctor.py              watcher-mcp doctor (diagnóstico) y el aviso del alias install-mcp
   jobs.py                núcleo: jobs, cola, límites, watchdog, logs, informe
   process.py             exec sin shell, lectura en vivo (pipe/pty/stdbuf), terminación acotada
   notify.py              eventos -> notifications/message, resources/updated, subscriptions/listen

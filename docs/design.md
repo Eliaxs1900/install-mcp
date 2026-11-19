@@ -58,6 +58,8 @@ instalador es un **backend** que solo traduce parámetros a comandos.
 | `backends/pip.py` | Backend pip/uv con venv aislado. |
 | `notify.py` | Puente `JobEvent` → `notifications/message`, `resources/updated`, bus `subscriptions/listen`. |
 | `server.py` | Tools y recursos MCP; espera con `notifications/progress`. |
+| `cli.py` | Modo CLI (`run`, `status`, `logs`, `list`) sobre `JobManager`, sin MCP. |
+| `doctor.py` | `watcher-mcp doctor`: diagnóstico de solo lectura; aviso del alias `install-mcp`. |
 
 ## 3. Ciclo de vida de un job
 
@@ -225,6 +227,52 @@ Notas:
 
 Los errores previsibles (backend no permitido, parámetros inválidos, job
 inexistente) se devuelven como `isError` con un mensaje claro.
+
+## 6b. Modo CLI y diagnóstico
+
+`__main__.py` decide qué arrancar: sin subcomando, el servidor MCP por stdio exactamente como siempre
+(`watcher-mcp [--config F] [--state-dir D]`, que es como lo registraron los clientes); con
+`run|status|logs|list|doctor`, la CLI de `cli.py`. Las opciones globales valen antes y después del
+subcomando. El comando de `run` va tras `--` y no pasa por argparse.
+
+**`run` reutiliza el núcleo, no lo duplica.** Crea un `JobManager` con un único backend `run` y llama a
+`submit`: límites, `io_mode`, watchdog, escalada SIGTERM → SIGKILL, redacción y persistencia son los
+del servidor. La salida en vivo se obtiene siguiendo el `output.log` del job (ya escrito línea a línea
+y redactado) y los avisos de atasco llegan como `JobEvent` por un listener. Ctrl-C/SIGTERM activan el
+`cancel_event` del job (cancelación ordenada); una segunda señal cancela la tarea principal y
+`shutdown` cancela el job, que mata el grupo con SIGKILL.
+
+**Códigos de salida**: el del comando; `124` (`timed_out`, como `timeout(1)`); `130` (cancelado); `127`/`126`
+(no existe / no ejecutable); `2` (uso o configuración). Una muerte por señal N sale como `128+N`.
+
+**Decisión de seguridad: la CLI no aplica la allowlist `[backends.run]`** (ni `allowed_roots`), salvo con
+`--strict`. La allowlist existe para limitar lo que puede pedir un agente a través de MCP; quien invoca
+la CLI ya está en una shell con sus propios permisos, y exigir configuración previa la inutilizaría
+justo cuando falta el servidor MCP. Alternativas descartadas: aplicarla siempre (la CLI no serviría sin
+configurar) y no ofrecer ningún modo estricto (no habría forma de acotar una regla `Bash(watcher-mcp run *)`).
+Para el modo laxo hay un `CliRunBackend` propio (sin sonda `--version` final); para `--strict`, el
+`RunBackend` del servidor. Nunca `shell=True`. Riesgo asumido y documentado: una regla de permisos
+`Bash(watcher-mcp run *)` equivale a permitir cualquier comando.
+
+**`status`/`logs`/`list` son de solo lectura.** No usan `JobManager.load_history()` (que recoge huérfanos
+y mata procesos): cargan `job.json` con `Job.from_disk` y deciden la vida del dueño con un `flock`
+compartido no bloqueante sobre `instances/<id>.lock`, sin crear ni borrar nada. Un job no terminado cuyo
+dueño vive es `foreign` (solo lectura); si el dueño murió, se muestra como interrumpido sin reescribir el
+`job.json`: el siguiente servidor lo recoge de verdad. Un `run` de la CLI mantiene su flock mientras vive,
+así que los servidores MCP lo ven como cualquier otra instancia.
+
+**`doctor` solo diagnostica.** Cada comprobación devuelve un `Finding` (ok/aviso/fallo/omitido, mensaje y
+arreglo); el código de salida es 1 si hay algún fallo. El servidor se prueba lanzándose a sí mismo
+(`python -m watcher_mcp` con un `state_dir` temporal, para no reclamar huérfanos ni dejar locks en el real)
+y esperando `initialize` con timeout. Para cada registro de `claude mcp list` y de Claude Desktop que
+mencione watcher-mcp/install-mcp comprueba que el ejecutable existe y que el módulo del que importa su
+script de consola (o el de `python -m`) se importa con el intérprete de su shebang: es el fallo de la
+issue #8 (`ModuleNotFoundError` tras el renombrado). No escribe nunca en registros ni configuración y solo
+invoca `claude mcp list`; el arreglo se muestra como comando para que lo ejecute el usuario.
+
+**Alias `install-mcp`**: `legacy_main` imprime por stderr (stdout es el canal MCP) que el nombre está
+obsoleto y el comando exacto para volver a registrarlo, conservando los argumentos con que se lanzó, y
+sirve con normalidad. Se retirará en una versión futura.
 
 ## 7. Interfaz de backend
 

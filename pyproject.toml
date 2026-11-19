@@ -41,6 +41,8 @@ Issues = "https://github.com/Eliaxs1900/watcher-mcp/issues"
 
 [project.scripts]
 watcher-mcp = "watcher_mcp.__main__:main"
+# Alias de transición del nombre anterior (avisa por stderr y sirve igual). Se retirará en una versión futura.
+install-mcp = "watcher_mcp.__main__:legacy_main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/watcher_mcp"]
