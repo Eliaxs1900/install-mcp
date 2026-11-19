@@ -86,13 +86,18 @@ Estados: `queued`, `running`, `stalled` (no terminales) y `succeeded`, `failed`,
   Un error ahí es un error de la tool, no un job fallido.
 - **queued**: el job espera dos cosas, en este orden: el lock de su `lock_key`
   (dos instalaciones en el mismo venv, o dos `apt-get` que comparten el lock de
-  dpkg, nunca corren a la vez) y un hueco del semáforo `max_parallel`.
+  dpkg, nunca corren a la vez) y un hueco del semáforo `max_parallel`. El lock es
+  `asyncio.Lock` dentro del proceso **más** un `flock` por clave en
+  `<state_dir>/locks/<sha1>.lock`, para que dos servidores (dos sesiones) con el mismo
+  `state_dir` tampoco pisen el mismo venv o clon. La espera del `flock` se sondea y respeta
+  `max_queue_s` y la cancelación; las claves sin uso se descartan.
 - **running**: los pasos se ejecutan en orden. Un `CommandStep` puede declarar
   `skip_if` (p. ej. "el venv ya existe"), `timeout_s`, `ok_exit_codes`, `env`,
   `env_remove` y `privileged`. Un `FuncStep` ejecuta Python (verificar un
   checksum, descomprimir…) y escribe en el mismo log.
 - **Fin**: si todo fue bien, el backend detecta versiones con una *sonda* (comando
-  corto con salida capturada). Se construye el informe, se escribe en disco y se
+  corto con salida capturada; se puede cancelar y cuenta para el timeout global del job).
+  Se construye el informe, se escribe en disco y se
   emite el evento `finished`.
 - **stalled**: es un *sub-estado* de `running`; el proceso sigue vivo. Lo marca el
   watchdog (§4) y se notifica con pid, comando, segundos sin salida y últimas líneas.
@@ -101,7 +106,13 @@ Estados: `queued`, `running`, `stalled` (no terminales) y `succeeded`, `failed`,
 - **Cierre del servidor**: `shutdown()` cancela los jobs activos para no dejar
   procesos huérfanos. Al arrancar, los jobs que quedaron `running` en disco se
   marcan `failed` ("interrumpido").
-- **Retención**: se guardan los últimos `max_jobs_kept` jobs terminados.
+- **Retención**: se guardan los últimos `max_jobs_kept` jobs terminados. Además se borran las
+  carpetas de `jobs/` sin `job.json` legible y sin actividad desde hace más de 7 días (caída
+  entre crear la carpeta y guardar el job, versión incompatible).
+- **Varias sesiones**: `get`, `list` y `wait` vuelven a leer del disco los jobs `foreign` (en
+  curso en otra sesión viva): al terminar allí se reflejan aquí, y si su dueño muere se marcan
+  `failed` ("interrumpido"). Los jobs que otra sesión lanza después de arrancar este servidor
+  también se ven (`get` por id, `list` reescanea). `wait` sobre un job ajeno sondea el disco.
 
 ### Logs
 
@@ -128,7 +139,12 @@ Cada línea es `<ISO-8601 UTC> <stream> | <texto>` con `stream` ∈ `stdout`,
   atasca, el watchdog añade una línea `atasco: sin salida desde hace Ns (pid …)`.
 - **Persistencia**: `<state_dir>/jobs/<id>/output.log` se escribe línea a línea
   (se puede seguir con `tail -f`). En memoria se guardan las últimas
-  `memory_log_lines`; si se piden más, se lee el fichero.
+  `memory_log_lines`; si se piden más, se lee el fichero. Una línea = un evento = una línea
+  física = un `seq`: los saltos de línea del texto (`python -c "a\nb"` en el `$ comando`) se
+  escapan como `\n`, para que `seq` y el fichero no se desincronicen.
+- **Tope en disco**: `max_log_bytes` (256 MiB por defecto; 0 = sin tope). Al superarlo se deja
+  de escribir `output.log` (queda una línea `log truncado…`) pero el job sigue vigilado y la
+  memoria sigue recibiendo líneas.
 - **Seguimiento incremental**: cada línea tiene un `seq`. `logs(job_id, since_seq=N)`
   devuelve solo lo nuevo; `last_seq` es el cursor para la siguiente llamada.
 
@@ -378,7 +394,10 @@ resuelto bajo `cwd_under`. Si ninguna casa, el error lista cada regla con el mot
 (quedaría en `job.json`). `Plan.inherit_env` y `Plan.env_from` llevan solo nombres y el
 núcleo (`JobManager._inherit_env`) pone los valores en el `env` de cada `CommandStep` y los
 añade a `Plan.secrets`, así que se redactan en todas partes (logs, `status`, `logs`,
-notificaciones, informe). Fuentes (`envsource.py`):
+notificaciones, informe). La redacción se aplica **a la salida**, en un solo sitio: `summary`
+y `error` al asignarse, y `Job.status()` (que también escribe `job.json`), el informe y los
+eventos (`_emit`) pasan por `Redactor.redact_obj`; así no depende de que cada backend
+redacte su `summary`, su `result_info` o los argumentos que muestra. Fuentes (`envsource.py`):
 
 | Origen del nombre | Entorno del servidor | Shell de login | Si falta |
 |---|---|---|---|

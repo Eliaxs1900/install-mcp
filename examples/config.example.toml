@@ -21,6 +21,7 @@ default_io_mode = "pipe"          # pipe | pty | stdbuf
 max_wait_s = 300                  # tope duro de wait()
 memory_log_lines = 5000
 max_jobs_kept = 200
+max_log_bytes = 268435456         # tope del output.log de cada job en disco (0 = sin tope)
 
 # Dónde pueden escribir los backends (venvs por ruta, clones, descargas) y leer ficheros pedidos
 # (requirements, repos locales).
