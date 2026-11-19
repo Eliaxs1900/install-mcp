@@ -110,7 +110,8 @@ Cada línea es `<ISO-8601 UTC> <stream> | <texto>` con `stream` ∈ `stdout`,
 - **Sin buffering**: el núcleo fija `PYTHONUNBUFFERED=1`, `NO_COLOR=1`,
   `TERM=dumb` para todos los pasos; stdout y stderr se leen en streaming, en trozos, y
   se cortan por `\n` **y** `\r`, así que las barras de progreso que reescriben la
-  línea también aparecen. Líneas de más de 8 KiB se trocean. Para programas que no
+  línea también aparecen. Las líneas de más de 8 KiB se trocean en varios registros
+  (no se pierde nada, aunque no lleven salto de línea). Para programas que no
   son Python, el modo de E/S (`io_mode`, por paso, backend o global) elige:
 
   | `io_mode` | stdout | Cuándo |
@@ -356,6 +357,23 @@ backend `apt` (`binwalk`, `squashfs-tools`, `p7zip-full`), que requiere
 9. **Límites** (§4): timeout global por job, por paso y en cola, watchdog de atasco,
    espera acotada con tope duro, `max_parallel`, cancelación del grupo de procesos
    completo con SIGTERM y luego SIGKILL.
+10. **Entorno de los jobs**: se copia el del servidor **menos** una lista explícita
+    (`SERVER_ONLY_ENV` en `process.py`): `CLAUDE_CODE_MESSAGING_TOKEN` y
+    `CLAUDE_CODE_MESSAGING_SOCKET` (credenciales con las que la app deja al servidor mensajear
+    entre sesiones), `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` y los datos de la
+    cuenta (`CLAUDE_CODE_ACCOUNT_UUID`, `CLAUDE_CODE_ORGANIZATION_UUID`, `CLAUDE_CODE_USER_EMAIL`).
+    Sin esto, un `setup.py` de pip o un programa de `run` las leería. Se mantienen PATH, HOME, los
+    proxies y el resto de `CLAUDE_CODE_*` (p. ej. los ids de sesión). Para dar una a propósito:
+    `inherit_env` o `env` del backend (lo explícito manda). Lo mismo vale para las sondas de versión.
+11. **Procesos fuera del grupo**: al cancelar o agotar el tiempo, antes de señalar se fotografía el
+    árbol de descendientes (`ps`) y, tras el barrido del grupo, se termina (SIGTERM, gracia,
+    SIGKILL) a los que habían hecho `setsid`/creado su grupo (servidores de desarrollo, daemons de
+    build): se anota en el log del job y, si ni SIGKILL los mata, salen en `orphans`. Límites: un
+    proceso que ya se había desvinculado de su padre (doble `fork`) no aparece en el árbol y no se
+    puede atribuir de forma fiable; con el job terminado con éxito no se toca a nadie.
+12. **Salida acotada**: las sondas de versión (`run_capture`) leen como mucho
+    `MAX_CAPTURE_BYTES` (64 KiB) por flujo; al pasarlo se mata el grupo y la sonda falla (un
+    programa que imprima sin parar no llena la memoria).
 
 Lo que **no** cubre el prototipo: aislamiento del sistema de ficheros (sandbox),
 límites de CPU/memoria, y el contenido de un `requirements.txt` (pip lo interpreta
