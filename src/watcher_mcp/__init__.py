@@ -6,3 +6,4 @@ from .server import create_server
 
 __all__ = ["Config", "Job", "JobManager", "JobState", "create_server"]
 __version__ = "0.3.1"
+# prueba de ci_local (rama temporal, no se mergea)
