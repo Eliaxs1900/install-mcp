@@ -18,7 +18,8 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from .base import Backend, CommandStep, Plan, Probe
+from ..logsummary import next_useful
+from .base import Backend, CommandStep, Plan, Probe, ResultContext
 from .common import LimitParams, check_all, existing_dir, tool_path
 
 # groupId:artifactId:version[:tipo[:clasificador]]; el tipo admite guiones (maven-plugin, test-jar).
@@ -44,15 +45,20 @@ _GRADLE_SUMMARY = re.compile(r"(\d+) tests? completed(?:, (\d+) failed)?(?:, (\d
 _GRADLE_FAIL = re.compile(r"^(?P<name>\S.*? > .*?) FAILED$")
 
 
-def _tests_report(run: int, failures: int, errors: int, skipped: int, failed: list[str]) -> dict[str, Any]:
+def _tests_report(run: int, failures: int, errors: int, skipped: int, failed: list[str],
+                  *, ok: bool = True) -> dict[str, Any]:
     out: dict[str, Any] = {"run": run, "failures": failures, "errors": errors, "skipped": skipped,
                            "passed": max(run - failures - errors - skipped, 0)}
+    if run == 0 and not ok:
+        out["executed"] = False  # el job falló y no llegó a ejecutarse ningún test
     if failed:
         out["failed_tests"] = failed[:20]
     return out
 
 
 def _tests_headline(t: dict[str, Any]) -> str:
+    if t.get("executed") is False:
+        return "tests: no llegaron a ejecutarse"
     bad = t["failures"] + t["errors"]
     text = f"tests: {t['run']} ejecutados, {bad} fallidos" + (f", {t['skipped']} omitidos" if t["skipped"] else "")
     if t.get("failed_tests"):
@@ -77,8 +83,38 @@ def _pom_coords(d: Path) -> str | None:
     return f"{find('groupId') or '?'}:{find('artifactId') or '?'}:{find('version') or '?'}"
 
 
-def _jars(d: Path) -> list[str]:
-    return sorted(p.name for p in d.glob("*.jar")) if d.is_dir() else []
+# Holgura al comparar el mtime con el arranque del job (sistemas de ficheros con mtime de 1-2 s).
+MTIME_SLACK_S = 1.0
+
+
+def _jars(d: Path) -> list[tuple[str, float]]:
+    """(nombre, mtime) de los jars de ``d``."""
+    out: list[tuple[str, float]] = []
+    for p in sorted(d.glob("*.jar")) if d.is_dir() else []:
+        try:
+            out.append((p.name, p.stat().st_mtime))
+        except OSError:
+            continue
+    return out
+
+
+def _built_info(d: Path, rel: str, context: ResultContext | None) -> dict[str, Any]:
+    """``built``: jars que ESTE job ha generado (mtime >= arranque) y solo si acabó en ``succeeded``.
+    ``stale``: los jars más viejos que ya había (de un ``package`` anterior). Si el job no acabó bien
+    no se lista ninguno: no hay forma de saber qué se generó y sería engañoso. Sin ``context``
+    (llamada antigua) se mantiene el comportamiento previo: todos en ``built``."""
+    jars = _jars(d)
+    if context is None:
+        return {"built": [f"{rel}/{n}" for n, _ in jars[:10]]} if jars else {}
+    if not context.ok or context.started_at is None:
+        return {}
+    limit = context.started_at - MTIME_SLACK_S
+    info: dict[str, Any] = {}
+    if fresh := [n for n, m in jars if m >= limit]:
+        info["built"] = [f"{rel}/{n}" for n in fresh[:10]]
+    if stale := [n for n, m in jars if m < limit]:
+        info["stale"] = [f"{rel}/{n}" for n in stale[:10]]
+    return info
 
 
 def _wrapper(d: Path, name: str, use: str) -> str | None:
@@ -184,15 +220,14 @@ class MavenBackend(Backend[MavenParams]):
             return {f"{g}:{art}": f"{v} (en ~/.m2)"}
         return {}  # test/package/verify… no instalan nada: el proyecto y lo construido van en info
 
-    def result_info(self, spec: MavenParams) -> dict[str, Any]:
+    def result_info(self, spec: MavenParams, context: ResultContext | None = None) -> dict[str, Any]:
         if not spec.project_dir:
             return {"repository": str(Path.home() / ".m2" / "repository")}
         d = Path(spec.project_dir)
         info: dict[str, Any] = {"project_dir": str(d), "goals": spec.goals}
         if coords := _pom_coords(d):
             info["project"] = coords
-        if built := _jars(d / "target"):
-            info["built"] = [f"target/{j}" for j in built[:10]]
+        info.update(_built_info(d / "target", "target", context))
         return info
 
     def summarize(self, spec: MavenParams, output: list[str], *, ok: bool) -> dict[str, Any]:
@@ -216,13 +251,15 @@ class MavenBackend(Backend[MavenParams]):
                 if (m := _TEST_FAIL.search(line)) and not m.group("name").startswith("Tests run:")
             ))
             if found:
-                tests = _tests_report(*totals, failed)
+                tests = _tests_report(*totals, failed, ok=ok)
                 out["report"]["tests"] = tests
                 out["headline"] = _tests_headline(tests)
         if not ok:
-            err = next((m.group(1) for line in output if (m := _MVN_ERROR.match(line.strip()))
-                        and "BUILD FAILURE" not in line), None)
+            err, at = next(((m.group(1), i) for i, line in enumerate(output)
+                            if (m := _MVN_ERROR.match(line.strip())) and "BUILD FAILURE" not in line), (None, 0))
             if err:
+                if err.endswith(":") and (cause := next_useful(output, at + 1)):
+                    err = f"{err} {cause}"  # "Failed to execute goal …:" corta justo antes de la causa
                 out["error_detail"] = err[:300]
             text = "\n".join(output[-400:])
             if spec.offline and ("has not been downloaded from it before" in text or "offline mode" in text):
@@ -286,11 +323,10 @@ class GradleBackend(Backend[GradleParams]):
     async def detect_versions(self, spec: GradleParams, probe: Probe) -> dict[str, str]:
         return {}  # Gradle construye, no instala: lo construido va en info["built"]
 
-    def result_info(self, spec: GradleParams) -> dict[str, Any]:
+    def result_info(self, spec: GradleParams, context: ResultContext | None = None) -> dict[str, Any]:
         d = Path(spec.project_dir)
         info: dict[str, Any] = {"project_dir": str(d), "tasks": spec.tasks}
-        if built := _jars(d / "build" / "libs"):
-            info["built"] = [f"build/libs/{j}" for j in built[:10]]
+        info.update(_built_info(d / "build" / "libs", "build/libs", context))
         return info
 
     def summarize(self, spec: GradleParams, output: list[str], *, ok: bool) -> dict[str, Any]:
@@ -299,7 +335,7 @@ class GradleBackend(Backend[GradleParams]):
         failed = list(dict.fromkeys(m.group("name") for line in output if (m := _GRADLE_FAIL.match(line.strip()))))
         if summary:
             run, fails, skipped = (int(x or 0) for x in summary.groups())
-            tests = _tests_report(run, fails, 0, skipped, failed)
+            tests = _tests_report(run, fails, 0, skipped, failed, ok=ok)
             out["report"]["tests"] = tests
             out["headline"] = _tests_headline(tests)
         elif failed:

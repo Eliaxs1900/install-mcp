@@ -54,7 +54,8 @@ instalador es un **backend** que solo traduce parámetros a comandos.
 | `jobs.py` | `Job`, `JobManager`, estados, logs, informe, persistencia, eventos. |
 | `process.py` | Ejecución sin shell con lectura en vivo y cancelación del grupo de procesos. |
 | `security.py` | `Redactor`, `require_https`, `Checksum`, `ensure_within_roots`, `reject_option_like`. |
-| `backends/base.py` | Interfaz `Backend`, `Plan`, `CommandStep`, `FuncStep`. |
+| `logsummary.py` | Selección de `relevant_lines`: `RELEVANT`, filtro de ruido y duplicados. |
+| `backends/base.py` | Interfaz `Backend`, `Plan`, `CommandStep`, `FuncStep`, `ResultContext`. |
 | `backends/pip.py` | Backend pip/uv con venv aislado. |
 | `notify.py` | Puente `JobEvent` → `notifications/message`, `resources/updated`, bus `subscriptions/listen`. |
 | `server.py` | Tools y recursos MCP; espera con `notifications/progress`. |
@@ -151,9 +152,32 @@ También incluye `limits` (`job_timeout_s`, `stall_timeout_s`, `io_mode`) y
 `stalls` (cuántas veces se atascó).
 
 Si falla o se agota el tiempo: `error` explica qué paso falló y con qué código (o qué
-límite venció), `relevant_lines` trae
-hasta 20 líneas de stdout/stderr que encajan con `error|failed|fatal|not found|
-no matching|denied|…`, y `log_tail` las últimas 25.
+límite venció), `relevant_lines` trae hasta 20 líneas de stdout/stderr y `log_tail` las
+últimas 25. `relevant_lines` (`logsummary.py`) se elige así, sobre las últimas 20 000
+líneas del log (las mismas que lee `summarize`):
+
+1. solo cuentan las líneas que encajan con `RELEVANT` (`error`, `failed`, `fatal`,
+   `Traceback`, `XxxError`/`XxxException`, `npm ERR!`, `not found`, `denied`…);
+2. se descarta el ruido (`NOISE`): marcos de traza (`at …`, `... N more`, también con
+   prefijo `[ERROR]`), líneas `[ERROR]` vacías y el texto de ayuda de Maven
+   (`-> [Help 1]`, `Re-run Maven…`, `[Help 1] http…`), Gradle (`* Try:`,
+   `Run with --stacktrace…`, `Get more help at…`) y npm (`A complete log of this run…`);
+3. se quitan los duplicados (Maven repite bloques enteros);
+4. si quedan más de 20, se toman las **10 primeras** (las de stderr tienen prioridad: suelen
+   ser la causa) y las **10 últimas** (el resumen final), en orden cronológico. Así una traza
+   larga después del error ya no desplaza la causa.
+
+Resumen del backend (`summarize`): en Maven, si `error_detail` (`Failed to execute goal … :`)
+acaba en `:`, se le añade la siguiente línea `[ERROR]` que no sea ruido (la causa). En
+Maven y Gradle, si el job falla y no llegó a ejecutarse ningún test (`run == 0`), el titular
+dice `tests: no llegaron a ejecutarse` y `tests.executed` es `false`, en lugar de
+`0 ejecutados, 0 fallidos`.
+
+`info.built` / `info.stale` (Maven y Gradle): `built` lista solo los jars que ha generado
+**este** job (`mtime >=` arranque del job, con 1 s de holgura por la resolución del sistema de
+ficheros) y solo si el job acaba en `succeeded`. Los jars anteriores de `target/` o
+`build/libs/` (de un `package` previo) salen aparte en `stale`. Si el job falla, se cancela o
+vence, no se lista ninguno: no se sabe qué se generó y sería engañoso.
 
 ## 4. Límites: ninguna espera es infinita
 
@@ -240,8 +264,13 @@ class Backend(ABC, Generic[P]):
     def requires_privileges(self, spec) -> bool         # ¿necesita root?
     def plan(self, spec) -> Plan                        # pasos con argv explícitos
     async def detect_versions(self, spec, probe) -> dict[str, str]
-    def result_info(self, spec) -> dict                 # rutas útiles para el informe
+    def result_info(self, spec, context=None) -> dict   # rutas útiles para el informe
 ```
+
+`result_info` recibe, si declara el parámetro `context` (o `**kwargs`), un `ResultContext`
+(`started_at`, `ok`, `state`) para distinguir lo que generó este job de lo que ya existía.
+Los backends externos con la firma antigua `result_info(self, spec)` siguen funcionando: el
+núcleo solo pasa el contexto si el método lo acepta.
 
 `Plan(summary, steps, lock_key, secrets, timeout_s, stall_timeout_s)`:
 
