@@ -412,8 +412,8 @@ backend `apt` (`binwalk`, `squashfs-tools`, `p7zip-full`), que requiere
    regex estrictas (p. ej. requisitos PEP 508 sin URLs) y se rechaza cualquier valor
    que empiece por `-`. Donde la herramienta lo admite, se usa `--` antes de los
    argumentos posicionales.
-3. **Allowlist de backends** (`allowed_backends`, por defecto solo `pip`). Registrar un
-   plugin no lo habilita.
+3. **Allowlist de backends** (`allowed_backends`; por defecto todos menos `apt`, que necesita root,
+   y `run`, que ejecuta programas de una lista que hay que configurar). Registrar un plugin no lo habilita.
 4. **Sin `sudo` por defecto**: los backends que necesitan root lo declaran
    (`requires_privileges` / `CommandStep.privileged`) y el servidor los rechaza salvo
    `allow_privileged = true`. Aun así se usa `sudo -n` (no interactivo): si sudo pide

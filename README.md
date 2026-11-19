@@ -127,6 +127,7 @@ flowchart LR
     J --> P["process.py<br/>exec sin shell · pipe/pty<br/>SIGTERM → SIGKILL"]
     J --> B["backends/<br/>web: download · binary<br/>código: pip · git · npm · cargo · go · maven · gradle<br/>sistema: brew · apt · docker · run"]
     J -. "output.log · job.json<br/>report.json" .-> D[("~/.local/state/<br/>watcher-mcp")]
+    J -. "fin del job (opcional)<br/>busbridge.py" .-> SB["sessionbus<br/>(aviso a la sesión<br/>que lo lanzó)"]
 ```
 
 - **Backends como planificadores puros**: un backend solo valida parámetros y devuelve
@@ -149,9 +150,17 @@ flowchart LR
     tamaño y de número de ficheros;
   - `git` neutraliza la configuración local del repo (hooks, fsmonitor, credential helpers) y no
     actualiza repos que no clonó salvo `trust_existing: true`;
+  - `maven` rechaza las propiedades `-D` que son rutas de salida o de configuración (`outputFile`,
+    `maven.repo.local`, `argLine`…), y cualquier valor con forma de ruta pasa por las raíces y las
+    zonas protegidas;
   - `npm` sin scripts de instalación por defecto; `run` con allowlist de programas o reglas por
     prefijo de argumentos y carpeta, y lista de variables de entorno permitidas; los secretos se
     heredan por nombre (`inherit_env`/`env_from`) y su valor se redacta;
+  - los jobs no heredan las credenciales con las que la app habla con el servidor (mensajería entre
+    sesiones, OAuth) ni los datos de la cuenta: un `setup.py` cualquiera no puede leerlas. El resto
+    del entorno (PATH, HOME, proxies…) sí se hereda;
+  - cancelar o agotar el tiempo termina el grupo de procesos y también a los descendientes que se
+    habían separado de él (`setsid`);
   - solo HTTPS;
   - redacción de tokens y contraseñas en logs, argv, informes y parámetros guardados.
 - **Varias sesiones a la vez**: cada sesión de Claude Code arranca su propio servidor y todos
@@ -209,7 +218,7 @@ Comprueba que conecta con `claude mcp list`.
 | `list_jobs(state?, limit=20)` | Jobs recientes. |
 | `logs(job_id, tail=50, since_seq?, stream=all)` | Últimas líneas; con `since_seq`, solo las nuevas. |
 | `wait(job_id, timeout_s?)` | Espera acotada (60 s por defecto, tope duro 300 s): el informe, o "sigue en curso" con pid y últimas líneas. Emite `notifications/progress`. |
-| `cancel(job_id)` | Cancela (SIGTERM y luego SIGKILL al grupo de procesos). |
+| `cancel(job_id)` | Cancela: SIGTERM y luego SIGKILL al grupo de procesos y a los hijos que se habían separado de él con `setsid`. |
 
 Recursos: `job://<id>` (estado + informe) y `jobs://list`. Los avisos van a quien lanzó
 el job (`notifications/message`, con el informe en `data.report`) y a quien esté
@@ -317,7 +326,7 @@ configuración (`[backends.pip] job_timeout_s = 1800`) o globalmente.
 
 Ver [examples/config.example.toml](examples/config.example.toml):
 
-- `allowed_backends`: la allowlist (por defecto solo `pip`).
+- `allowed_backends`: la allowlist (por defecto, todos menos `apt` y `run`; ver [Backends](#backends)).
 - `allow_privileged`: `false` por defecto.
 - `allowed_roots`: dónde pueden escribir (y leer ficheros pedidos) los backends.
 - `protect_dot_paths` (`true`) y `protected_home_dirs` (subrutas de HOME con comodines; por defecto
@@ -407,11 +416,15 @@ docker build --target test -t watcher-mcp:test .
 docker run --rm watcher-mcp:test
 ```
 
-Son 69 tests sin red:
+Los tests sin red (más de 200) cubren:
 - núcleo: jobs en paralelo, logs en vivo, cancelación, `stalled`, `timed_out`, `wait`
   acotado, pipe frente a pty, notificaciones de punta a punta por MCP y redacción de
   secretos;
-- validación y plan de los 13 backends;
+- procesos: líneas de más de 8 KiB sin pérdida, sondas con tope de salida, hijos que se separan
+  del grupo con `setsid` y entorno de los jobs sin las credenciales del servidor;
+- el informe de fallo: la causa antes que la traza (Maven, Gradle, Python, npm) y `built`/`stale`;
+- validación y plan de los 13 backends, incluidas las propiedades `-D` de Maven;
+- el aviso por sessionbus, con un CLI falso;
 - instalaciones reales offline: pip/uv con un wheel local, git con repos locales,
   descargas y binarios contra un servidor HTTPS local (checksum, extracción segura,
   redirección a http rechazada, atasco y cancelación) y `run`.
@@ -472,6 +485,12 @@ tests/                   pytest
   procesos se terminan al arrancar la siguiente instancia (en macOS, hasta entonces siguen vivos).
 - `binary` ejecuta el binario descargado para leer su versión: instalar un ejecutable de Internet
   implica confiar en él (el checksum lo da la misma petición).
+- Las rutas dentro de los worktrees de Claude Code (`<repo>/.claude/worktrees/…`), donde trabajan
+  las sesiones lanzadas con worktree, se rechazan porque caen bajo `.claude`, que es zona protegida
+  ([#22](https://github.com/Eliaxs1900/watcher-mcp/issues/22)). Mientras tanto, añade esa carpeta
+  a `allowed_roots` (`allowed_roots = ["~", "~/ruta/al/repo/.claude/worktrees"]`).
+- Un proceso que se separa del job con un doble fork (ya adoptado por init antes de cancelar) no se
+  puede atribuir al job: si sobrevive a un `cancel`, no se mata.
 - Usa el SDK `mcp` 2.x (`MCPServer`, el sucesor de FastMCP).
 
 ## Licencia
