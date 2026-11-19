@@ -287,7 +287,7 @@ async def test_secret_crossing_the_8kib_cut_is_redacted_before_chunking():
     code = f"print('x' * ({MAX_LINE} - 10) + ' ' + {SECRET!r} + ' ' + 'y' * 100)"
     lines: list[str] = []
     res = await run_command([sys.executable, "-c", code], env=build_env({}), cwd=None,
-                            on_line=lambda s, t: lines.append(t) if s == "stdout" else None,
+                            on_line=lambda s, t: lines.append(Redactor()(t)) if s == "stdout" else None,
                             cancel_event=asyncio.Event(), timeout_s=30, redact=Redactor())
     assert res.exit_code == 0
     joined = "".join(lines)
@@ -304,7 +304,7 @@ async def test_secret_crossing_the_cut_without_newline_and_across_reads(tmp_path
     )
     lines: list[str] = []
     await run_command([sys.executable, "-c", code], env=build_env({}), cwd=None,
-                      on_line=lambda s, t: lines.append(t) if s == "stdout" else None,
+                      on_line=lambda s, t: lines.append(Redactor()(t)) if s == "stdout" else None,
                       cancel_event=asyncio.Event(), timeout_s=30, redact=Redactor())
     joined = "".join(lines)
     assert "AAAAAAAAAA" not in joined and "***" in joined
@@ -425,3 +425,30 @@ async def test_pip_probe_output_stays_small_with_a_big_env():
 
     data = json.loads(out.strip().splitlines()[-1])
     assert code == 0 and set(data["dists"]) <= {"pytest"} and len(out) < 500
+
+
+# --- rendimiento del _pump: coste lineal, determinista (se cuentan caracteres, no segundos) ----------------
+async def test_pump_redaction_work_is_linear_and_short_lines_are_not_redacted_twice():
+    seen = [0]
+
+    def counting(text: str) -> str:
+        seen[0] += len(text)
+        return text
+
+    n_short = 0
+
+    def count(s, t):
+        nonlocal n_short
+        n_short += 1
+
+    code = "import sys\nfor i in range(300): sys.stdout.write('y' * 8192 + '\\n')"
+    await run_command([sys.executable, "-c", code], env=build_env({}), cwd=None, on_line=count,
+                      cancel_event=asyncio.Event(), timeout_s=60, redact=counting)
+    assert n_short == 300 and seen[0] == 0  # las líneas de hasta MAX_LINE no se redactan en _pump
+    seen[0] = 0
+    total = 4_000_000
+    await run_command([sys.executable, "-c", f"import sys; sys.stdout.write('x' * {total} + '\\n')"],
+                      env=build_env({}), cwd=None, on_line=lambda s, t: None, cancel_event=asyncio.Event(),
+                      timeout_s=60, redact=counting)
+    # Una franja de 2 x HOLD_BACK por corte: una fracción de la salida, no varias veces su tamaño.
+    assert 0 < seen[0] <= total
