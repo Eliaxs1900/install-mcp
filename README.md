@@ -354,7 +354,7 @@ Cubren los focos de interacción habituales de un agente de código. Todos acept
 
 | Foco | Backend | Para qué | Ejemplo de `params` |
 |---|---|---|---|
-| Web | `download` | Fichero por HTTPS, checksum opcional, extracción segura de tar/zip | `{"url": "https://…/fw.tar.gz", "dest": "~/fw", "extract": true, "checksum": "sha256:…"}` |
+| Web | `download` | Fichero por HTTPS, checksum opcional, extracción segura de tar/zip (cada miembro pasa por las zonas protegidas: un archivo con `.gitignore` o `.github/` necesita un destino que sea raíz explícita) | `{"url": "https://…/fw.tar.gz", "dest": "~/fw", "extract": true, "checksum": "sha256:…"}` |
 | Web | `binary` | Ejecutable suelto (checksum **obligatorio**), también dentro de un tar/zip | `{"url": "https://…/jq-linux-arm64", "checksum": "sha256:…", "name": "jq"}` |
 | Código | `pip` | Paquetes Python en un venv aislado (uv si está) | `{"packages": ["pypdf"], "venv": "tools"}` |
 | Código | `git` | Clonar/actualizar (https, ssh, local) sin prompts de credenciales | `{"url": "git@github.com:org/repo.git", "dest": "/abs/repo", "depth": 1}` |
@@ -435,7 +435,7 @@ configuración (`[backends.pip] job_timeout_s = 1800`) o globalmente.
 | Param | Ejemplo | Notas |
 |---|---|---|
 | `packages` | `["pypdf", "requests>=2.32"]` | PEP 508 sin URLs; nada que empiece por `-`. |
-| `requirements` | `"/abs/requirements.txt"` | Alternativa o complemento a `packages`. Dentro de `allowed_roots` y fuera de zonas protegidas (pip/uv copian en su error las líneas que no entienden). |
+| `requirements` | `"/abs/requirements.txt"` | Alternativa o complemento a `packages`. Dentro de `allowed_roots` y fuera de zonas protegidas (pip/uv copian en su error las líneas que no entienden). Se lee **antes** de lanzar pip, también los que incluye con `-r`/`-c`: solo se admiten requisitos sin URL ni rutas, `--index-url`/`--extra-index-url`/`-f` con https (o un directorio permitido), `-r`/`-c` a ficheros permitidos y los flags habituales (`--no-index`, `--pre`, `--hash=…`…); `-e`, variables `${VAR}` y lo demás se rechazan. |
 | `venv` | `"tools"` o `"/abs/ruta/.venv"` | Un nombre crea `<state_dir>/venvs/<nombre>`; una ruta debe estar dentro de `allowed_roots`. |
 | `python` | `"3.12"` o `"/abs/python3"` | Versión con uv (o `python3.12` en PATH). Una ruta debe llamarse `python3…`. |
 | `installer` | `"auto"` / `"uv"` / `"pip"` | `auto` = uv si está. |
@@ -456,7 +456,10 @@ Ver [examples/config.example.toml](examples/config.example.toml):
   las sensibles de `~/Library`: `LaunchAgents`, `Preferences`, `Keychains`, `Cookies`, `Mail`,
   `Messages`, `Safari`, `Containers`, `Group Containers`, `Application Support/com.apple.*`): zonas
   protegidas dentro de las raíces. Para usar una a propósito, añádela como raíz explícita (p. ej.
-  `~/.local/bin`).
+  `~/.local/bin`). Las subrutas de HOME valen aunque la raíz permitida sea un ancestro de HOME
+  (`/Users`, `/`). **Excepción**: los worktrees de Claude Code, `<repo>/.claude/worktrees/<nombre>/…`,
+  se aceptan (ahí viven las sesiones lanzadas con worktree); dentro del worktree siguen
+  protegidos `.git`, `.env`, `.claude/settings*`… y fuera de `worktrees/<nombre>`, `.claude` también.
 - `max_job_timeout_s` (24 h): tope duro de cualquier job. `func_cancel_grace_s` (75 s): cuánto se
   espera a que un paso interno cancelado (una descarga) suelte su hilo antes de liberar su lock.
 - Límites: `max_parallel`, `default_wait_s`, `max_wait_s`, `max_queue_s`,
