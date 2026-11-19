@@ -41,8 +41,9 @@ DRAIN_S = 3.0
 # acotado: ``yes --version`` se corta en milisegundos. Se puede cambiar por llamada (``max_bytes``).
 MAX_CAPTURE_BYTES = 4 * 1024 * 1024
 # Una línea sin terminar se emite troceada al pasar de MAX_LINE; se retienen estos caracteres de más
-# para que un secreto que cruza el corte se redacte entero antes de salir (ver ``_pump``).
-HOLD_BACK = 512
+# para que un secreto que cruza el corte se redacte entero antes de salir (ver ``_safe_cut``). Es también
+# el tamaño máximo de secreto que se garantiza proteger si cae justo en un corte (1 KiB: tokens, JWT...).
+HOLD_BACK = 1024
 
 # Variables del servidor que los jobs NO heredan: credenciales con las que Claude Code deja que el
 # servidor MCP hable con la app (mensajería entre sesiones, OAuth) y datos personales de la cuenta.
@@ -124,11 +125,12 @@ async def _pump(
 ) -> None:
     """Lee ``stream`` y emite líneas (cortadas por ``\\n`` y ``\\r``; las de más de ``MAX_LINE`` en trozos).
 
-    Si hay redactor (``redact`` o el del objeto de ``on_line``), se aplica a la línea ENTERA antes de
-    trocearla: un secreto que cruza el corte de 8 KiB no puede quedar partido en dos trozos que ya no
-    casan con los patrones.
+    Las líneas salen sin redactar: quien recibe (``Job.add_line``) lo hace, una sola vez. Las de más de
+    ``MAX_LINE`` se trocean y ``redact`` (el explícito o el del dueño de ``on_line``) solo sirve para
+    elegir cortes que no partan un secreto (``_safe_cut``), mirando una franja pequeña alrededor del
+    corte: coste lineal en la longitud de la línea.
     """
-    redact = redact or _line_redactor(on_line) or (lambda text: text)
+    redact = redact or _line_redactor(on_line)
     buf = ""
     # Decodificador incremental: un carácter multibyte partido entre dos lecturas (á, ñ, emojis)
     # se completa con la siguiente en vez de salir como "��".
@@ -147,22 +149,74 @@ async def _pump(
                 break
             line, buf = buf[:idx], buf[idx + 1 :]
             if line.strip():
-                _emit_chunks(on_line, name, redact(line))
-        while len(buf) > MAX_LINE + HOLD_BACK:  # línea gigantesca sin salto: se emite troceada
-            buf = redact(buf)  # entera; lo que se queda (el final, que aún puede crecer) ya va redactado
-            if len(buf) <= MAX_LINE + HOLD_BACK:
-                break
-            on_line(name, buf[:MAX_LINE])
-            buf = buf[MAX_LINE:]
+                _emit_line(on_line, name, line, redact)
+        # Sin salto y ya muy larga: se emite troceada; se retiene ``HOLD_BACK`` por si el final aún
+        # completa un secreto que cruza el corte.
+        buf = _emit_long(on_line, name, buf, redact, final=False)
     buf += decoder.decode(b"", final=True)
     if buf.strip():
-        _emit_chunks(on_line, name, redact(buf))
+        _emit_line(on_line, name, buf, redact)
 
 
-def _emit_chunks(on_line: Callable[[str, str], None], name: str, line: str) -> None:
-    """Una línea de más de ``MAX_LINE`` se emite en varios trozos: no se pierde nada."""
-    for i in range(0, len(line), MAX_LINE):
-        on_line(name, line[i : i + MAX_LINE])
+def _emit_line(
+    on_line: Callable[[str, str], None], name: str, line: str, redact: Callable[[str], str] | None
+) -> None:
+    """Una línea terminada: entera si cabe; si no, en trozos (no se pierde nada)."""
+    if len(line) > MAX_LINE:
+        line = _emit_long(on_line, name, line, redact, final=True)
+    if line:
+        on_line(name, line)
+
+
+def _emit_long(
+    on_line: Callable[[str, str], None], name: str, text: str, redact: Callable[[str], str] | None,
+    *, final: bool,
+) -> str:
+    """Emite trozos de ``text`` mientras sobre más de lo que cabe; devuelve el resto sin emitir.
+
+    ``final=False`` (línea sin terminar): se retienen ``HOLD_BACK`` caracteres de más (solo si hay
+    redactor; sin él no hay nada que proteger). ``final=True``: el resto es ``<= MAX_LINE``.
+    """
+    hold = HOLD_BACK if (redact and not final) else 0
+    pos = 0
+    while len(text) - pos > MAX_LINE + hold:
+        window = text[pos : pos + MAX_LINE + HOLD_BACK]
+        cut = _safe_cut(window, redact)
+        on_line(name, window[:cut])
+        pos += cut
+    return text[pos:]
+
+
+def _safe_cut(window: str, redact: Callable[[str], str] | None) -> int:
+    """Posición del corte de ``window`` (una ventana de más de ``MAX_LINE``) que no cruza un secreto.
+
+    Los trozos salen SIN redactar: lo hace quien recibe las líneas (``Job.add_line``), una sola vez;
+    aquí solo se elige dónde cortar. Un corte es seguro si redactar por separado lo de antes y lo de
+    después da lo mismo que redactar el conjunto: si un secreto lo cruzase, cada mitad casaría peor con
+    los patrones y el resultado sería distinto. Solo se mira la franja ``HOLD_BACK`` a cada lado del
+    corte (un secreto de hasta ``HOLD_BACK`` caracteres que lo cruce cabe entera en ella): el coste es
+    constante por corte, no depende de lo larga que sea la línea. Es conservador: puede descartar cortes
+    buenos, nunca aceptar uno malo. Si ninguno es seguro (secretos de más de ``HOLD_BACK``), se corta en
+    ``MAX_LINE``.
+    """
+    cut = MAX_LINE
+    if redact is None:
+        return cut
+    lo, hi = max(0, cut - HOLD_BACK), min(len(window), cut + HOLD_BACK)
+    region = window[lo:hi]
+    whole = redact(region)
+    if whole == region:  # lo normal: nada que redactar cerca del corte
+        return cut
+    space = window.rfind(" ", lo, cut)
+    tried: set[int] = set()
+    for cand in (cut, cut - 1, cut - 8, cut - 32, cut - 128, cut - 512, space + 1):
+        k = cand - lo
+        if k < 1 or cand in tried:
+            continue
+        tried.add(cand)
+        if redact(region[:k]) + redact(region[k:]) == whole:
+            return cand
+    return cut
 
 
 def _die_with_parent() -> None:  # pragma: no cover - solo Linux, en el hijo antes de exec
@@ -484,7 +538,7 @@ async def run_capture(
     overflow = asyncio.create_task(over.wait())
     try:
         done, _ = await asyncio.wait({everything, overflow}, timeout=timeout_s, return_when=asyncio.FIRST_COMPLETED)
-        if everything in done:
+        if everything in done and not over.is_set():  # con tope superado, ambas pueden estar listas
             out, err = everything.result()
             await asyncio.wait_for(_exited(proc), KILL_GRACE_S)
             return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
