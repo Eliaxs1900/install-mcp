@@ -93,6 +93,9 @@ MAP: dict[str, list[str]] = {
     "tests/test_core.py": ["tests/test_core.py", "tests/test_limits.py"],
     "tests/test_report_12_14.py": ["tests/test_report_12_14.py"],
     "tests/test_maven_props.py": ["tests/test_maven_props.py"],
+    "scripts/ci_local.py": ["tests/test_ci_local.py"],
+    "scripts/verificar_local.py": ["tests/test_ci_local.py"],
+    "tests/test_ci_local.py": ["tests/test_ci_local.py"],
     "tests/test_select_tests.py": ["tests/test_select_tests.py"],
 }
 

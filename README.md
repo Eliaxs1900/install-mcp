@@ -409,6 +409,39 @@ python scripts/select_tests.py --base origin/main --tiers         # qué tocarí
 .venv/bin/python -m pytest -q -m "not e2e" $(python scripts/select_tests.py --base origin/main)
 ```
 
+### Pruebas verificadas en local (mantenedores)
+
+Si ya pasaste la suite completa en tu máquina, no tiene sentido que GitHub la repita. Un
+**mantenedor** (rol `admin` o `maintain`) puede certificarlo:
+
+```bash
+python scripts/verificar_local.py            # el PR de la rama actual (--pr N, --pythons 3.12, --no-publicar)
+```
+
+Necesita `git`, `gh` (con sesión) y `uv`. El script:
+
+1. toma lo que GitHub iba a probar: la mezcla base + cabeza del PR (`refs/pull/N/merge`) y su **árbol**;
+2. la extrae a un worktree temporal (nunca tu árbol de trabajo, con sus cambios sin commitear);
+3. ejecuta la suite **completa** (puntuales + E2E) con Python 3.11, 3.12 y 3.13;
+4. si todo pasa, publica el commit status `tests-locales` = `success` en la cabeza del PR (la descripción lleva
+   el árbol probado, el SO, los Pythons y el número de tests);
+5. cancela y relanza las ejecuciones de `tests.yml` de esa cabeza.
+
+Entonces el job `select` ve el status y deja `puntuales=NONE`, `e2e=NONE`; `resultado` sale en verde y
+dice de dónde viene («verificado en local por X en Darwin-arm64»). Lo mismo en el push a `main`: si el PR
+mergeado tenía un `tests-locales` válido con el mismo árbol que el commit empujado, tampoco se repite.
+
+Qué cubre y qué no: solo **el sistema operativo de quien lo lanza** (la CI completa cubre Linux y macOS), y solo
+ese árbol exacto: si el PR cambia, o `main` se mueve y GitHub recalcula la mezcla, el árbol ya no coincide y la CI
+corre entera.
+
+Modelo de confianza: el mantenedor lo certifica con sus credenciales. La CI solo omite si **todo** esto se cumple
+(`scripts/ci_local.py`): el status lo puso una persona con rol `admin` o `maintain` (se consulta con la API, no
+con lo que diga el PR), el PR es del propio repositorio (no de un fork) y el árbol anotado es el que GitHub probaría.
+Una etiqueta o un trailer en el commit **no** cuentan: los puede poner el autor del PR. En un PR la CI ejecuta la
+versión de `ci_local.py` de la **base**, no la del PR, así que un PR no puede cambiar las reglas con las que se
+juzga. Ante cualquier duda o fallo de la consulta: CI completa, como siempre. El check obligatorio sigue siendo `resultado`.
+
 ## Tests y demos en Docker (sin ensuciar tu máquina)
 
 ```bash
