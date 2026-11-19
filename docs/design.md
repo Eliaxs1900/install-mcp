@@ -420,15 +420,27 @@ backend `apt` (`binwalk`, `squashfs-tools`, `p7zip-full`), que requiere
    contraseña, el paso falla en vez de quedarse colgado.
 5. **Rutas acotadas**: todo lo que se escribe (venvs, clones, descargas) debe caer en
    `allowed_roots` (por defecto `$HOME`) o en `state_dir`; se resuelven symlinks antes de
-   comprobarlo.
+   comprobarlo. Las zonas protegidas (componentes ocultos y `protected_home_dirs`) se aplican a
+   cualquier ruta bajo HOME aunque la raíz sea un ancestro de HOME; solo una raíz explícita
+   dentro de HOME las exime. Excepción estrecha: `.claude/worktrees/<nombre>` (worktrees de
+   Claude Code); lo que cuelga del worktree se sigue comprobando.
 6. **Redacción de secretos** en cada línea de log, en el argv mostrado, en los
    parámetros guardados y en el informe: credenciales en URLs
    (`https://user:pass@` → `https://***@`), `token=`, `password=`, `api_key=`,
    `Authorization:`, tokens con formato conocido (GitHub, GitLab, AWS, Slack, `sk-…`),
    patrones extra de la configuración y literales concretos que declara cada plan
-   (entre ellos los valores heredados con `inherit_env`/`env_from`).
+   (entre ellos los valores heredados con `inherit_env`/`env_from`). Los patrones de clave/valor
+   cubren valores entrecomillados con espacios y JSON (`"password": "x"`); en el argv también el valor
+   tras `--password`/`--token`… y `-p`/`-u` en `sshpass`/`curl`/`mysql`. Se aplican sobre cada línea en el
+   bucle de eventos, así que no pueden tener coste cuadrático: empiezan al principio de un
+   identificador, acotan su longitud y llevan una guarda barata (hay un test de tiempo con líneas
+   de 8 KiB).
 7. **Descargas**: solo `https://` (`require_https`) y checksum opcional
-   (`Checksum.parse("sha256:…").verify_file()`), obligatorio para binarios sueltos.
+   (`Checksum.parse("sha256:…").verify_file()`), obligatorio para binarios sueltos. La descarga
+   lee con `read1` y comprueba cancelación y timeout en cada trozo (un servidor que gotea bytes no
+   la bloquea). La extracción valida **todo** el archivo antes de escribir (cada miembro ya resuelto
+   pasa por raíces y zonas protegidas), extrae a una carpeta temporal dentro del destino y solo al
+   final mueve; lo que se pisa con `overwrite=true` se aparta antes y se restaura si algo falla.
 8. **Sin interacción**: `stdin` es `/dev/null`; se fijan `PIP_NO_INPUT`,
    `GIT_TERMINAL_PROMPT=0`, `DEBIAN_FRONTEND=noninteractive`, etc.
 9. **Límites** (§4): timeout global por job, por paso y en cola, watchdog de atasco,
@@ -453,8 +465,9 @@ backend `apt` (`binwalk`, `squashfs-tools`, `p7zip-full`), que requiere
     programa que imprima sin parar no llena la memoria).
 
 Lo que **no** cubre el prototipo: aislamiento del sistema de ficheros (sandbox),
-límites de CPU/memoria, y el contenido de un `requirements.txt` (pip lo interpreta
-tal cual; lo controla quien escribe el fichero).
+límites de CPU/memoria. El `requirements.txt` se valida antes de lanzar pip (solo requisitos
+sin URL y opciones verificables, recursivamente); queda una ventana entre esa validación y la
+ejecución en la que quien pueda escribir el fichero puede cambiarlo.
 
 ## 9. Cómo añadir un backend
 

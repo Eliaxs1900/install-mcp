@@ -9,12 +9,15 @@ importa aquí:
 * tamaño máximo (``[backends.download] max_bytes``, 5 GiB por defecto);
 * checksum ``sha256:…`` (opcional en ``download``, obligatorio en ``binary``);
 * escritura en ``.part`` y renombrado atómico al final;
-* extracción segura de tar/zip (sin rutas absolutas, ``..`` ni enlaces fuera del destino).
+* extracción segura de tar/zip (sin rutas absolutas, ``..`` ni enlaces fuera del destino; cada miembro,
+  ya resuelto, pasa por las raíces y las zonas protegidas; se valida todo el archivo antes de escribir,
+  se extrae a una carpeta temporal y solo al final se mueve a su sitio, con marcha atrás si algo falla).
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import os
 import re
@@ -26,6 +29,8 @@ import tarfile
 import time
 import urllib.request
 import zipfile
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -91,7 +96,11 @@ def fetch(
             while True:
                 if cancelled():
                     raise DownloadCancelled()
-                chunk = resp.read(CHUNK)
+                # read1 vuelve tras UN recv: ``read(CHUNK)`` espera a juntar 256 KiB y un servidor que gotea
+                # bytes lo bloquearía (sin mirar ``cancelled()``) mientras llegue 1 byte cada < timeout_s.
+                # Así, cancelar o agotar el tiempo del job corta la descarga en cuanto llega el siguiente
+                # trozo, y como mucho tras ``timeout_s`` sin datos (cubierto por func_cancel_grace_s).
+                chunk = resp.read1(CHUNK)
                 if not chunk:
                     break
                 got += len(chunk)
@@ -130,12 +139,21 @@ class _Budget:
     def __init__(self, max_bytes: int, max_files: int, cancelled: Any) -> None:
         self.max_bytes, self.max_files, self.cancelled = max_bytes, max_files, cancelled
         self.bytes = 0
+        self.declared = 0
         self.files = 0
 
-    def new_file(self) -> None:
+    def _too_big(self) -> ValueError:
+        return ValueError(f"lo extraído supera {_human(self.max_bytes)} (max_extract_bytes): ¿bomba de descompresión?")
+
+    def new_file(self, declared_size: int = 0) -> None:
         self.files += 1
         if self.max_files and self.files > self.max_files:
             raise ValueError(f"el archivo tiene más de {self.max_files} ficheros (max_extract_files)")
+        # Tamaños que declara el archivo: corta de entrada lo evidente. Los reales se cuentan al copiar
+        # (un archivo puede mentir en su cabecera).
+        self.declared += max(declared_size, 0)
+        if self.max_bytes and self.declared > self.max_bytes:
+            raise self._too_big()
 
     def copy(self, src: Any, dst: Any) -> None:
         while True:
@@ -146,8 +164,18 @@ class _Budget:
                 return
             self.bytes += len(chunk)
             if self.max_bytes and self.bytes > self.max_bytes:
-                raise ValueError(f"lo extraído supera {_human(self.max_bytes)} (max_extract_bytes): ¿bomba de descompresión?")
+                raise self._too_big()
             dst.write(chunk)
+
+
+@dataclass
+class _Entry:
+    rel: str
+    is_dir: bool
+    mode: int | None  # permisos a aplicar (None: los del sistema)
+    size: int
+    open: Callable[[], Any] | None  # abre el contenido (ficheros)
+    target: Path | None = None  # destino final, ya resuelto y validado
 
 
 def extract(
@@ -161,54 +189,41 @@ def extract(
     max_bytes: int = MAX_EXTRACT_BYTES,
     max_files: int = MAX_EXTRACT_FILES,
     cancelled: Any = lambda: False,
+    validate: Callable[[Path], object] | None = None,
 ) -> list[Path]:
     """Extrae ``archive`` en ``dest`` de forma segura. Con ``member`` extrae solo ese fichero.
 
-    Límites de tamaño total y de número de ficheros; si se superan (o se cancela) se borran
-    los ficheros ya escritos. Con ``overwrite=False`` no se pisa ningún fichero existente.
+    1. Valida TODO el archivo antes de escribir nada: nombres (sin ``..`` ni rutas absolutas), destino ya
+       resuelto de cada miembro (``validate``: raíces y zonas protegidas), límites de ficheros y de tamaño y,
+       con ``overwrite=False``, que no pise ningún fichero existente.
+    2. Extrae a una carpeta temporal dentro de ``dest`` (mismo sistema de ficheros).
+    3. Mueve cada fichero a su sitio. Lo que ya existía (``overwrite=True``) se aparta antes y, si algo falla
+       o se cancela, se restaura y se quita lo nuevo: un fallo nunca deja el destino peor que estaba.
     """
     dest.mkdir(parents=True, exist_ok=True)
     root = dest.resolve()
-    written: list[Path] = []
     budget = _Budget(max_bytes, max_files, cancelled)
-    try:
-        _extract_into(archive, root, strip_components, member, overwrite, budget, written, log)
-    except BaseException:
-        for path in written:
-            path.unlink(missing_ok=True)
-        raise
+    with _open_archive(archive, strip_components, member, log) as entries:
+        files = _validate_entries(entries, root, overwrite, budget, validate)
+        written = _stage_and_commit(entries, files, root, overwrite, budget, cancelled)
     if member and not written:
         raise ValueError(f"el archivo no contiene {member!r}")
     log(f"extraídos {len(written)} ficheros ({_human(budget.bytes)}) en {dest}")
     return written
 
 
-def _claim(target: Path, overwrite: bool) -> None:
-    if not overwrite and target.exists():
-        raise ValueError(f"{target} ya existe (overwrite=false)")
-    target.parent.mkdir(parents=True, exist_ok=True)
-
-
-def _extract_into(
-    archive: Path, root: Path, strip_components: int, member: str | None, overwrite: bool,
-    budget: _Budget, written: list[Path], log: Any,
-) -> None:
-    name = archive.name.lower()
-    if name.endswith(".zip"):
+@contextlib.contextmanager
+def _open_archive(archive: Path, strip_components: int, member: str | None, log: Any) -> Iterator[list[_Entry]]:
+    entries: list[_Entry] = []
+    if archive.name.lower().endswith(".zip"):
         with zipfile.ZipFile(archive) as zf:
             for info in zf.infolist():
                 rel = _strip(info.filename, strip_components)
                 if rel is None or info.is_dir() or (member and rel != member):
                     continue
-                target = _safe_target(root, rel)
-                budget.new_file()
-                _claim(target, overwrite)
-                written.append(target)
-                with zf.open(info) as src, open(target, "wb") as dst:
-                    budget.copy(src, dst)
                 mode = (info.external_attr >> 16) & 0o777
-                if mode:
-                    target.chmod(mode)
+                entries.append(_Entry(rel, False, mode or None, info.file_size, lambda info=info: zf.open(info)))
+            yield entries
     else:
         with tarfile.open(archive) as tf:
             for ti in tf.getmembers():
@@ -218,18 +233,98 @@ def _extract_into(
                 if not (ti.isfile() or ti.isdir()):
                     log(f"  omitido {ti.name!r}: solo se extraen ficheros y directorios")
                     continue
-                target = _safe_target(root, rel)
                 if ti.isdir():
-                    target.mkdir(parents=True, exist_ok=True)
-                    continue
-                budget.new_file()
-                _claim(target, overwrite)
-                written.append(target)
-                src = tf.extractfile(ti)
-                assert src is not None
-                with src, open(target, "wb") as dst:
-                    budget.copy(src, dst)
-                target.chmod(ti.mode & 0o755 or 0o644)
+                    entries.append(_Entry(rel, True, None, 0, None))
+                else:
+                    entries.append(_Entry(rel, False, ti.mode & 0o755 or 0o644, ti.size,
+                                          lambda ti=ti: tf.extractfile(ti)))
+            yield entries
+
+
+def _validate_entries(
+    entries: list[_Entry], root: Path, overwrite: bool, budget: _Budget, validate: Callable[[Path], object] | None
+) -> list[_Entry]:
+    """Resuelve y valida el destino de cada miembro (sin escribir nada). Devuelve los ficheros."""
+    files: list[_Entry] = []
+    seen: set[Path] = set()
+    for entry in entries:
+        entry.target = target = _safe_target(root, entry.rel)
+        if validate is not None:
+            validate(target)  # raíces + zonas protegidas del destino final (.zshrc, .ssh, LaunchAgents, .git/hooks…)
+        if entry.is_dir:
+            continue
+        budget.new_file(entry.size)
+        if target in seen and not overwrite:
+            raise ValueError(f"{target} aparece repetido en el archivo (overwrite=false)")
+        if target.is_dir():
+            raise ValueError(f"{target} es un directorio y el archivo trae un fichero con ese nombre")
+        if not overwrite and (target.exists() or target.is_symlink()):
+            raise ValueError(f"{target} ya existe (overwrite=false)")
+        seen.add(target)
+        files.append(entry)
+    return files
+
+
+def _stage_and_commit(
+    entries: list[_Entry], files: list[_Entry], root: Path, overwrite: bool, budget: _Budget, cancelled: Any
+) -> list[Path]:
+    stage = root / f".watcher-extract-{secrets.token_hex(4)}"
+    stage.mkdir()
+    placed: list[Path] = []  # ficheros nuevos ya en su sitio
+    backups: list[tuple[Path, Path]] = []  # (destino, copia apartada) de lo que se pisó
+    made_dirs: list[Path] = []
+    try:
+        staged: list[tuple[_Entry, Path]] = []
+        for i, entry in enumerate(files):
+            if cancelled():
+                raise DownloadCancelled()
+            source = stage / f"f{i}"
+            assert entry.open is not None
+            src = entry.open()
+            assert src is not None
+            with src, open(source, "wb") as dst:
+                budget.copy(src, dst)
+            if entry.mode:
+                source.chmod(entry.mode)
+            staged.append((entry, source))
+        for entry in entries:  # directorios del archivo (también los vacíos)
+            if entry.is_dir and entry.target is not None:
+                _make_dirs(entry.target, made_dirs)
+        for i, (entry, source) in enumerate(staged):
+            assert entry.target is not None
+            target = entry.target
+            _make_dirs(target.parent, made_dirs)
+            if target.exists() or target.is_symlink():
+                backup = stage / f"b{i}"
+                shutil.move(str(target), str(backup))
+                backups.append((target, backup))
+            shutil.move(str(source), str(target))
+            placed.append(target)
+    except BaseException:
+        for path in reversed(placed):
+            path.unlink(missing_ok=True)
+        for target, backup in reversed(backups):
+            with contextlib.suppress(OSError):
+                shutil.move(str(backup), str(target))
+        for directory in reversed(made_dirs):
+            with contextlib.suppress(OSError):
+                directory.rmdir()  # solo si ha quedado vacío
+        raise
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+    return placed
+
+
+def _make_dirs(path: Path, made: list[Path]) -> None:
+    """``mkdir -p`` que apunta los directorios que ha creado (para quitarlos si hay marcha atrás)."""
+    missing = []
+    current = path
+    while not current.exists() and current != current.parent:
+        missing.append(current)
+        current = current.parent
+    for directory in reversed(missing):
+        directory.mkdir(exist_ok=True)
+        made.append(directory)
 
 
 def _filename_from_url(url: str) -> str:
@@ -326,7 +421,8 @@ class DownloadBackend(Backend[DownloadParams]):
                 try:
                     await asyncio.to_thread(
                         extract, archive, target, strip_components=spec.strip_components, log=ctx.log,
-                        overwrite=spec.overwrite, cancelled=ctx.cancelled, **self._extract_limits(),
+                        overwrite=spec.overwrite, cancelled=ctx.cancelled, validate=self._member_validator(),
+                        **self._extract_limits(),
                     )
                 finally:
                     archive.unlink(missing_ok=True)
@@ -345,6 +441,12 @@ class DownloadBackend(Backend[DownloadParams]):
             secrets=url_secrets(spec.url) + _query_secrets(spec.url),
             **spec.limits(),
         )
+
+    def _member_validator(self) -> Callable[[Path], object]:
+        """Cada miembro del archivo, ya resuelto, pasa por las mismas raíces y zonas protegidas que ``dest``:
+        un archivo con ``.zshrc``, ``.ssh/authorized_keys``, ``Library/LaunchAgents/x.plist`` o ``.git/hooks/*``
+        no puede escribirlos aunque ``dest`` sea ``~`` o un proyecto."""
+        return lambda path: self.config.safe_path(path, what="miembro del archivo")
 
     def _extract_limits(self) -> dict[str, int]:
         return {

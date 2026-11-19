@@ -15,15 +15,19 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field
 
 from ..security import reject_option_like, require_https, url_secrets
 from .base import Backend, BackendParams, CommandStep, Plan, Probe
+
+if TYPE_CHECKING:
+    from ..config import Config
 
 # Subconjunto de PEP 508 sin URLs: nombre[extras] (especificadores) (; marcadores)
 _NAME = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
@@ -42,6 +46,115 @@ _PROBE_CODE = (
     "print(json.dumps({'python': sys.version.split()[0], "
     "'dists': {d.metadata['Name']: d.version for d in m.distributions() if d.metadata['Name']}}))"
 )
+
+
+# --- contenido de un requirements.txt --------------------------------------------------------------
+# pip/uv interpretan opciones dentro del propio fichero (``-r otro``, ``-c``, ``--index-url http://…``,
+# ``-e``, ``--find-links``…) que se saltan todas las validaciones de los parámetros: un ``-r ~/.netrc`` lee un
+# fichero protegido y pip copia en su error la línea que no entiende. Por eso se lee el fichero (y los que
+# incluye) ANTES de lanzar pip y solo se admite lo que se puede validar; lo demás se rechaza.
+MAX_REQUIREMENTS_DEPTH = 8
+MAX_REQUIREMENTS_BYTES = 1 << 20
+_HASH_OPTION = re.compile(r"\s+--hash[= ]\S+")
+# Opción larga -> (¿lleva valor?, tipo de valor).  ``file``: otro requirements; ``index``: URL https;
+# ``links``: URL https o directorio dentro de las raíces; ``flag``: sin valor; ``free``: nombres de
+# paquetes/formatos (``:all:``, ``:none:``, ``pkg``), validados con _REQ.
+_REQ_OPTIONS: dict[str, str] = {
+    "--requirement": "file", "--constraint": "file",
+    "--index-url": "index", "--extra-index-url": "index",
+    "--find-links": "links",
+    "--no-index": "flag", "--pre": "flag", "--prefer-binary": "flag", "--require-hashes": "flag",
+    "--only-binary": "free", "--no-binary": "free",
+}
+_SHORT_REQ_OPTIONS = {"-r": "--requirement", "-c": "--constraint", "-i": "--index-url", "-f": "--find-links"}
+
+
+def _bad_requirement_line(path: Path, number: int, why: str, line: str) -> ValueError:
+    shown = line if len(line) <= 60 else line[:57] + "…"
+    return ValueError(f"{path}:{number}: {why}: {shown!r}")
+
+
+def validate_requirements_file(path: Path, config: Config, *, _depth: int = 0, _seen: set[Path] | None = None) -> None:
+    """Valida un requirements.txt y, recursivamente, los que incluye con ``-r``/``-c``. ValueError si algo
+    no se puede garantizar (ruta fuera de las raíces o en zona protegida, índice no https, URL o ruta como
+    requisito, ``-e``, variables de entorno, opciones desconocidas…)."""
+    seen = _seen if _seen is not None else set()
+    path = path.resolve()
+    if path in seen:
+        return  # ciclo o fichero repetido: ya validado
+    seen.add(path)
+    if _depth > MAX_REQUIREMENTS_DEPTH:
+        raise ValueError(f"{path}: demasiados niveles de -r/-c anidados (máximo {MAX_REQUIREMENTS_DEPTH})")
+    try:
+        if path.stat().st_size > MAX_REQUIREMENTS_BYTES:
+            raise ValueError(f"{path}: más de {MAX_REQUIREMENTS_BYTES >> 10} KiB: no es un requirements.txt razonable")
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"{path}: no se puede leer como requirements.txt ({exc.__class__.__name__})") from None
+    logical = text.replace("\\\n", " ").replace("\\\r\n", " ")  # continuaciones de línea
+    for number, raw in enumerate(logical.splitlines(), start=1):
+        line = re.sub(r"(^|\s)#.*$", "", raw).strip()
+        if not line:
+            continue
+        if "$" in line:
+            raise _bad_requirement_line(path, number, "las variables de entorno (${VAR}) no se admiten", line)
+        if not line.startswith("-"):
+            requirement = _HASH_OPTION.sub("", line)
+            if not _REQ.match(requirement):
+                raise _bad_requirement_line(path, number, "requisito no válido (las URL, rutas y VCS no se admiten)", line)
+            continue
+        try:
+            tokens = shlex.split(line)
+        except ValueError:
+            raise _bad_requirement_line(path, number, "línea con comillas sin cerrar", line) from None
+        option, value = _split_option(tokens[0], tokens[1:])
+        kind = _REQ_OPTIONS.get(option)
+        if kind is None:
+            raise _bad_requirement_line(path, number, "opción no admitida en un requirements.txt", line)
+        if kind == "flag":
+            continue
+        if not value:
+            raise _bad_requirement_line(path, number, f"{option} necesita un valor", line)
+        if kind == "free":
+            if not all(v in (":all:", ":none:") or _REQ.match(v) for v in value.split(",")):
+                raise _bad_requirement_line(path, number, f"valor no válido para {option}", line)
+        elif kind == "index":
+            require_https(value, what=f"{option} en {path.name}:{number}")
+        elif kind == "links" and value.startswith(("http://", "https://")):
+            require_https(value, what=f"{option} en {path.name}:{number}")
+        else:  # file | links (directorio local)
+            target = _resolve_included(path.parent, value)
+            try:
+                resolved = config.safe_path(target, what=f"{option} en {path}:{number}")
+            except ValueError as exc:
+                raise ValueError(str(exc)) from None
+            if kind == "links":
+                if not resolved.is_dir():
+                    raise _bad_requirement_line(path, number, "find-links debe ser una URL https o un directorio", line)
+            else:
+                if not resolved.is_file():
+                    raise _bad_requirement_line(path, number, "el fichero incluido no existe", line)
+                validate_requirements_file(resolved, config, _depth=_depth + 1, _seen=seen)
+
+
+def _split_option(first: str, rest: list[str]) -> tuple[str, str | None]:
+    """``(-r f | -rf | --requirement f | --requirement=f)`` -> (opción larga canónica, valor)."""
+    if first.startswith("--"):
+        name, eq, value = first.partition("=")
+        if eq:
+            return name, value or None
+        return name, (rest[0] if rest else None)
+    short = first[:2]
+    if short in _SHORT_REQ_OPTIONS:
+        attached = first[2:]
+        return _SHORT_REQ_OPTIONS[short], attached or (rest[0] if rest else None)
+    return first, None
+
+
+def _resolve_included(base: Path, value: str) -> Path:
+    """Ruta de un fichero incluido: ``~`` se expande (uv lo hace) y lo relativo cuelga del fichero que lo incluye."""
+    expanded = Path(os.path.expanduser(value))
+    return expanded if expanded.is_absolute() else base / expanded
 
 
 def canonical(name: str) -> str:
@@ -101,6 +214,8 @@ class PipBackend(Backend[PipParams]):
             p = self.config.safe_path(spec.requirements, what="requirements")
             if not p.is_file():
                 raise ValueError(f"requirements debe ser un fichero existente: {spec.requirements!r}")
+            # También lo que el fichero incluye y sus opciones (-r, -c, --index-url…): ver validate_requirements_file.
+            validate_requirements_file(p, self.config)
         self.venv_path(spec)  # valida nombre/ruta
         if spec.python and not (_PY_VERSION.match(spec.python) or Path(spec.python).is_absolute()):
             raise ValueError("python debe ser una versión como '3.12' o una ruta absoluta")
