@@ -16,7 +16,8 @@ Lo que declara cada backend:
 * ``plan(spec)``: los comandos a ejecutar (``CommandStep``) o pasos internos en
   Python (``FuncStep``, p. ej. verificar un checksum).
 * ``detect_versions(spec, probe)``: qué quedó instalado y en qué versión.
-* ``result_info(spec)``: datos útiles para el informe (ruta del venv, del clon...).
+* ``result_info(spec[, context])``: datos útiles para el informe (ruta del venv, del clon...);
+  ``context`` (``ResultContext``: arranque y resultado del job) es opcional.
 * ``availability()``: si los ejecutables necesarios están presentes.
 """
 
@@ -63,6 +64,15 @@ class StepContext:
     # Escribe en el log del job; cuenta como actividad para el watchdog de atasco.
     log: Callable[[str], None]
     cancelled: Callable[[], bool]
+
+
+@dataclass
+class ResultContext:
+    """Cuándo y cómo acabó el job; ``result_info`` lo recibe si declara un parámetro ``context``."""
+
+    started_at: float | None  # epoch (s) del arranque del job; None si nunca arrancó
+    ok: bool  # el job acabó en ``succeeded``
+    state: str = ""
 
 
 @dataclass
@@ -175,7 +185,10 @@ class Backend(ABC, Generic[P]):
     async def detect_versions(self, spec: P, probe: Probe) -> dict[str, str]:
         return {}
 
-    def result_info(self, spec: P) -> dict[str, Any]:
+    def result_info(self, spec: P, context: ResultContext | None = None) -> dict[str, Any]:
+        """Datos útiles para el informe. ``context`` es opcional: el núcleo solo lo pasa si el
+        método lo declara (``context`` o ``**kwargs``), así los backends externos con la firma
+        ``result_info(self, spec)`` siguen funcionando."""
         return {}
 
     def summarize(self, spec: P, output: list[str], *, ok: bool) -> dict[str, Any]:

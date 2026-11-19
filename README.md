@@ -82,7 +82,10 @@ la demo comprueba al final que el proceso ya no existe.
 ### Fallo con informe
 
 Un paquete que no existe: el informe trae el código de salida y las líneas de error
-relevantes, sin tener que leer el log entero.
+relevantes, sin tener que leer el log entero. Las `relevant_lines` descartan las trazas
+(`at …`) y el texto de ayuda de Maven/Gradle, y mezclan las primeras líneas relevantes
+(la causa) con las últimas. En `maven`/`gradle`, `info.built` lista solo los jars que generó
+ese job (y solo si acabó bien); los anteriores salen en `info.stale`.
 
 ![fail](docs/demos/fail.gif)
 
@@ -408,6 +411,7 @@ también se pueden ejecutar directamente: `python examples/demo.py stall`,
 src/watcher_mcp/
   server.py              tools y recursos MCP, espera acotada con progreso
   jobs.py                núcleo: jobs, cola, límites, watchdog, logs, informe
+  logsummary.py          relevant_lines: causa del fallo sin trazas ni texto de ayuda
   process.py             exec sin shell, lectura en vivo (pipe/pty/stdbuf), terminación acotada
   notify.py              eventos -> notifications/message, resources/updated, subscriptions/listen
   security.py            redacción, https, checksums, raíces permitidas

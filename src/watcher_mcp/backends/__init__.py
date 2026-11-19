@@ -10,7 +10,7 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from .base import Backend, BackendParams, CommandStep, FuncStep, Plan, ProbeResult, StepContext
+from .base import Backend, BackendParams, CommandStep, FuncStep, Plan, ProbeResult, ResultContext, StepContext
 from .download import BinaryBackend, DownloadBackend
 from .ecosystems import CargoBackend, GoBackend, NpmBackend
 from .git import GitBackend
@@ -49,6 +49,7 @@ __all__ = [
     "Plan",
     "PipBackend",
     "ProbeResult",
+    "ResultContext",
     "StepContext",
     "load_registry",
 ]
