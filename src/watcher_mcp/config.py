@@ -33,6 +33,54 @@ PROTECTED_HOME_PATHS: tuple[str, ...] = (
 )
 
 
+SESSIONBUS_EVENTS = ("finished", "stalled")
+SESSIONBUS_PRIORITIES = ("alerta", "normal", "baja")
+SESSIONBUS_MAX_TIMEOUT_S = 5.0
+
+
+def _default_sessionbus_priorities() -> dict[str, str]:
+    # ``baja`` no se inyecta nunca en la sesión (solo queda en su bandeja): un aviso de fin de job
+    # que no llega no sirve. Por eso un éxito va en ``normal`` y lo que requiere atención, en ``alerta``.
+    return {
+        "succeeded": "normal", "cancelled": "normal",
+        "failed": "alerta", "timed_out": "alerta", "stalled": "alerta",
+    }
+
+
+@dataclass
+class SessionbusConfig:
+    """``[sessionbus]``: aviso opcional por sessionbus a la sesión que lanzó el job (ver busbridge.py)."""
+
+    # Desactivado por defecto: sessionbus es un componente aparte y watcher-mcp no depende de él.
+    enabled: bool = False
+    # CLI de sessionbus como lista de argumentos (sin shell). Vacío = autodetección: ``sessionbus`` en
+    # el PATH y, si no está, ``~/Desktop/sessionbus-mcp/.venv/bin/sessionbus``.
+    command: list[str] = field(default_factory=list)
+    # Eventos que se publican: ``finished`` y, opcionalmente, ``stalled``.
+    events: list[str] = field(default_factory=lambda: ["finished"])
+    # Prioridad por estado del job (``succeeded``, ``failed``, ``timed_out``, ``cancelled``,
+    # ``stalled``): ``alerta`` | ``normal`` | ``baja``. Lo que se omite usa el valor por defecto.
+    priorities: dict[str, str] = field(default_factory=_default_sessionbus_priorities)
+    # Tiempo máximo de la llamada al CLI (tope duro de 5 s).
+    timeout_s: float = SESSIONBUS_MAX_TIMEOUT_S
+    # Caducidad de la trama en segundos.
+    ttl_s: float = 86400.0
+    # Nombre del remitente en el bus (``cli-<nombre>``).
+    node_name: str = "watcher-mcp"
+
+    def __post_init__(self) -> None:
+        bad = [e for e in self.events if e not in SESSIONBUS_EVENTS]
+        if bad:
+            raise ValueError(f"[sessionbus] events desconocidos: {bad} (válidos: {list(SESSIONBUS_EVENTS)})")
+        self.priorities = {**_default_sessionbus_priorities(), **self.priorities}
+        bad_p = {k: v for k, v in self.priorities.items() if v not in SESSIONBUS_PRIORITIES}
+        if bad_p:
+            raise ValueError(f"[sessionbus] priorities inválidas: {bad_p} (válidas: {list(SESSIONBUS_PRIORITIES)})")
+        if not 0 < self.timeout_s:
+            raise ValueError("[sessionbus] timeout_s debe ser > 0")
+        self.timeout_s = min(float(self.timeout_s), SESSIONBUS_MAX_TIMEOUT_S)
+
+
 def default_config_path() -> Path:
     return Path.home() / ".config" / "watcher-mcp" / "config.toml"
 
@@ -115,6 +163,8 @@ class Config:
     login_shell: str | None = None
     # Opciones por backend: ``[backends.pip] prefer_uv = true``.
     backends: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Aviso del fin de job a la sesión que lo lanzó, por sessionbus (``[sessionbus]``).
+    sessionbus: SessionbusConfig = field(default_factory=SessionbusConfig)
     # Fichero del que se cargó la configuración (o donde se buscaría). No es una clave del TOML.
     source_path: Path | None = field(default=None, repr=False)
 
@@ -184,6 +234,12 @@ class Config:
             from .envsource import check_env_names
 
             kwargs["inherit_env"] = check_env_names(kwargs["inherit_env"], what="inherit_env")
+        if "sessionbus" in kwargs:
+            raw = dict(kwargs["sessionbus"])
+            unknown_sb = set(raw) - set(SessionbusConfig.__dataclass_fields__)
+            if unknown_sb:
+                raise ValueError(f"Claves desconocidas en [sessionbus]: {sorted(unknown_sb)}")
+            kwargs["sessionbus"] = SessionbusConfig(**raw)
         if "allowed_roots" in kwargs:
             kwargs["allowed_roots"] = [Path(p).expanduser() for p in kwargs["allowed_roots"]]
         return cls(**kwargs)

@@ -206,6 +206,34 @@ Notas:
 - En el protocolo 2026-07-28 el logging fuera de petición ya no existe: ahí el aviso
   es `ResourceUpdated` por `subscriptions/listen` + leer `job://<id>`.
 
+### Aviso por sessionbus (opcional)
+
+`busbridge.py` es un listener más de `JobEvent` (como `notify.py`), registrado en `create_server`
+solo con `[sessionbus] enabled = true`. Existe porque Claude Code no enseña al modelo las
+`notifications/message`: sessionbus (fase 5 de su hoja de ruta) sí inyecta en cada sesión, por hook,
+las tramas dirigidas a `nodo/<su id>/…`. Contrato acordado con sessionbus:
+
+| Aspecto | Valor |
+|---|---|
+| Destinatario | Solo la sesión que lanzó el job: el servidor es uno por sesión y su nodo es `CLAUDE_CODE_HOST_SESSION_ID` (si no, `CLAUDE_CODE_SESSION_ID`). Nada a `todos/**` ni a temas `repo/…` |
+| Tema / `kind` / caducidad | `nodo/<lanzador>/jobs/<job_id>`, `info`, 86 400 s |
+| Eventos | `finished` (por defecto) y, opcional, `stalled` (`events`) |
+| Prioridad | Por estado (`priorities`): `normal` si termina bien o se cancela; `alerta` si `failed`, `timed_out` o `stalled`. `baja` existe pero no se inyecta nunca, así que no sirve para un aviso |
+| Contenido | `summary` = titular del informe (≤ 200); `body` por stdin (≤ 16 KB, vuelto a pasar por el redactor): estado, `exit_code`, duración, `error`, `relevant_lines`, `log_file`, `job://` |
+
+Decisiones:
+
+- **Identidad.** `sessionbus publish` toma la identidad del entorno; si heredara
+  `CLAUDE_CODE_*` publicaría *como la sesión* y el bus nunca entrega a un nodo sus propias tramas.
+  El subproceso se lanza sin `CLAUDE_CODE_HOST_SESSION_ID`/`CLAUDE_CODE_SESSION_ID` y con
+  `SESSIONBUS_NODE_NAME=watcher-mcp`: remitente `cli-watcher-mcp`.
+- **Independencia.** Subproceso del CLI (sin importar sessionbus), sin shell, con `timeout_s`
+  (tope duro de 5 s; al vencer se mata). La ruta es `[sessionbus] command` o, sin ella, `sessionbus`
+  en el PATH y `~/Desktop/sessionbus-mcp/.venv/bin/sessionbus`.
+- **Fail-open.** El listener solo lanza una tarea en segundo plano y vuelve: no retrasa `finished`
+  ni cambia el estado del job. Un fallo (CLI ausente, timeout, código ≠ 0) se anota en el log del
+  job y en stderr. Sin identidad no se publica nada y se avisa una vez.
+
 ### Recursos
 
 - `job://{job_id}` — JSON con estado, 20 últimas líneas e informe si terminó.
