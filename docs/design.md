@@ -297,12 +297,28 @@ Agrupados por los focos de interacción habituales de un agente de código:
 | Código | **npm** | `packages` + `prefix`, o `project_dir` (+ `manager` auto/npm/pnpm/yarn), `ignore_scripts` | `npm install --prefix DIR --no-save -- pkgs`; proyecto: `npm ci` / `pnpm install --frozen-lockfile` / `yarn install --frozen-lockfile` | `npm ls --json --depth=0` | no | `path:<prefix>` |
 | Código | **cargo** | `crates` (`name[@ver]`), `root`, `locked` | `cargo install --root DIR --locked -- crate` (un paso por crate) | `cargo install --list` | no | `path:<root>` |
 | Código | **go** | `packages` (`ruta@versión`), `gobin` | `go install -v -- pkg@ver` con `GOBIN` | `go version -m GOBIN` | no | `path:<gobin>` |
-| Código | **maven** | `artifacts` (`g:a:v`), o `project_dir` + `goals` (allowlist), `skip_tests`, `offline`, `profiles`, `properties`, `use_wrapper` | `mvn -B -ntp dependency:get -Dartifact=…`; proyecto: `mvnw`/`mvn -B -ntp -f pom.xml <goals>` | `~/.m2` / pom + `target/*.jar` | no | `maven:repo` / `path:<proyecto>` |
+| Código | **maven** | `artifacts` (`g:a:v`), o `project_dir` + `goals` (allowlist), `skip_tests`, `offline`, `profiles`, `properties` (validadas, ver abajo), `use_wrapper` | `mvn -B -ntp dependency:get -Dartifact=…`; proyecto: `mvnw`/`mvn -B -ntp -f pom.xml <goals>` | `~/.m2` / pom + `target/*.jar` | no | `maven:repo` / `path:<proyecto>` |
 | Código | **gradle** | `project_dir`, `tasks` (allowlist, admite `:mod:tarea`), `exclude_test`, `offline`, `use_wrapper` | `gradlew`/`gradle --console=plain --no-daemon -p DIR <tasks>` | `build/libs/*.jar` | no | `path:<proyecto>` |
 | Sistema | **brew** | `formulae`, `casks`, `upgrade` | `brew install --formula -- …` / `--cask`; sin auto-update ni prompts | `brew list --versions` | no (no admite root) | `brew` |
 | Sistema | **apt** | `packages` (`nombre[=versión]`), `update`, `install_recommends` | `apt-get -y -q -o Dpkg::Lock::Timeout=120 update/install`, `DEBIAN_FRONTEND=noninteractive`; `sudo -n` si no es root | `dpkg-query -W` | **sí** | `apt` |
 | Sistema | **docker** | `images`, `platform` | `docker pull [--platform P] -- img` | id de la imagen | no | `docker` |
 | Comandos | **run** | `program` (allowlist `[backends.run] programs` o reglas `commands`), `args`, `cwd`, `env`, `env_from`, `io_mode`, `ok_exit_codes` | el programa con sus argumentos, sin shell | `<program> --version` | no | — |
+
+**`properties` de Maven (`-Dclave=valor`)**: no basta con validar la forma, porque varias propiedades
+son rutas de salida o de configuración (`dependency:tree -DoutputFile=~/.zshrc` sobrescribía un
+fichero protegido; `-Dmaven.repo.local=/x` escribía fuera de las raíces; `-DargLine=-javaagent:…`
+ejecutaría código). Se aplican tres reglas (`jvm._check_properties`): (1) se rechazan las claves
+que acaban en `file`, `dir`, `directory`, `path`, `home`, `classpath`, `executable`, `jvm`, `args`,
+`argLine`, `repository`, `toolchains`, que contienen `settings` o `repo.local`, o empiezan por
+`user.`, `env.`, `exec.`, `java.io.`, sin distinguir mayúsculas (lista negra: así siguen valiendo
+`skipTests`, `maven.surefire.debug`, `revision`, `maven.compiler.release`…); (2) los valores no
+pueden empezar por `-`; (3) los valores que son rutas (`/…`, `./…`, `a/b`; no las URL) pasan por
+`config.safe_path` (raíces permitidas y zonas protegidas; las relativas, contra `project_dir`, y
+sin `project_dir` se exige absoluta). Una clave bloqueada se abre a propósito con
+`[backends.maven] properties_allow = ["maven.repo.local"]`; su valor se sigue comprobando.
+Gradle no tiene parámetro equivalente (no admite `-P`/`-D`), así que no aplica.
+
+`project_dir` de `maven` y `gradle` expande `~` al validar, igual que el resto de backends.
 
 Todos aceptan además `job_timeout_s` y `stall_timeout_s`.
 

@@ -85,11 +85,13 @@ MAP: dict[str, list[str]] = {
     "src/watcher_mcp/backends/ecosystems.py": ["tests/test_backends.py", "tests/test_revision.py"],
     "src/watcher_mcp/backends/jvm.py": [
         "tests/test_backends.py", "tests/test_revision.py", "tests/test_issues_4_5.py", "tests/test_report_12_14.py",
+        "tests/test_maven_props.py",
     ],
     "src/watcher_mcp/backends/_template.py": ["tests/test_backends.py"],
     # test_limits importa helpers de test_core.
     "tests/test_core.py": ["tests/test_core.py", "tests/test_limits.py"],
     "tests/test_report_12_14.py": ["tests/test_report_12_14.py"],
+    "tests/test_maven_props.py": ["tests/test_maven_props.py"],
     "tests/test_select_tests.py": ["tests/test_select_tests.py"],
 }
 
