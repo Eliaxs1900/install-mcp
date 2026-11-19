@@ -169,7 +169,9 @@ def test_normalized_copy_has_only_validated_lines_and_flattens_includes(config, 
     assert result.constraints == [["rich==13.0"]]
     copy = write_private_copy(result, home / "privado")
     text = copy.read_text()
-    assert "#" not in text and "-r" not in text and "-c " in text
+    # Por líneas: la ruta temporal puede contener «-r» (/tmp/pytest-of-runner/… en los runners de GitHub).
+    lines = text.splitlines()
+    assert "#" not in text and not any(ln.startswith("-r") for ln in lines) and any(ln.startswith("-c ") for ln in lines)
     assert (copy.parent / "constraints-0.txt").read_text() == "rich==13.0\n"
     assert oct(copy.stat().st_mode & 0o777) == "0o600" and oct(copy.parent.stat().st_mode & 0o777) == "0o700"
 
