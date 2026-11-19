@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from ..logsummary import next_useful
 from .base import Backend, CommandStep, Plan, Probe, ResultContext
@@ -27,6 +27,15 @@ _GAV = re.compile(r"^[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+:[A-Za-z0-9_.+-]+(:[a-z0-9][
 GAV_FORMAT = "groupId:artifactId:version[:tipo[:clasificador]] (p. ej. org.apache.maven.plugins:maven-shade-plugin:3.6.0:maven-plugin)"
 _PROFILE = re.compile(r"^[A-Za-z0-9_.!-]{1,64}$")
 _PROP = re.compile(r"^[A-Za-z0-9_.-]{1,64}=[A-Za-z0-9_.,:/@+-]{0,200}$")
+# Propiedades (-Dclave=valor) que Maven/sus plugins usan como RUTA DE SALIDA, de configuración o para
+# arrancar código: con ellas un job aceptado escribiría fuera de las raíces/zonas protegidas
+# (``dependency:tree -DoutputFile=~/.zshrc``, ``-Dmaven.repo.local=/x``) o ejecutaría un agente
+# (``-DargLine=-javaagent:/x.jar``). Se compara sin distinguir mayúsculas con la clave completa.
+_PROP_DENY = re.compile(
+    r"(?i)(?:.*(?:file|files|dir|dirs|directory|path|home|executable|jvm|args?|argline|classpath|toolchains|repository|conf)|"
+    r".*settings.*|.*repo\.local.*|(?:user|env|exec|classworlds|java\.io)\..*)$"
+)
+_URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 MAVEN_GOALS = (
     "clean", "validate", "compile", "test-compile", "test", "package", "verify", "install",
     "dependency:go-offline", "dependency:resolve", "dependency:tree", "dependency:sources",
@@ -64,6 +73,36 @@ def _tests_headline(t: dict[str, Any]) -> str:
     if t.get("failed_tests"):
         text += " (" + ", ".join(t["failed_tests"][:3]) + ("…" if len(t["failed_tests"]) > 3 else "") + ")"
     return text
+
+
+def _expand_dir(value: str | None) -> str | None:
+    """``~`` -> HOME (como ``existing_dir``): sin esto el wrapper, el pom y los jars no se encuentran."""
+    return str(Path(value).expanduser()) if value else value
+
+
+def _check_properties(props: list[str], config: Any, *, base: Path | None, allow: list[str]) -> None:
+    """Valida cada ``clave=valor`` además de su forma: no se admiten claves que son rutas de salida o
+    de configuración (``_PROP_DENY``; ampliable con ``[backends.maven] properties_allow``), valores
+    que empiecen por ``-`` (opciones sueltas de JVM) ni valores que sean rutas fuera de las raíces
+    permitidas o en zonas protegidas. Los relativos con ``/`` se resuelven contra el proyecto."""
+    check_all(props, _PROP, what="propiedad")
+    allowed = {a.lower() for a in allow}
+    for prop in props:
+        key, _, value = prop.partition("=")
+        if key.lower() not in allowed and _PROP_DENY.match(key):
+            raise ValueError(
+                f"propiedad no permitida: {key!r} (suele apuntar a rutas de salida o de configuración, o "
+                f"a opciones de la JVM). Si de verdad la necesitas, añádela a [backends.maven] "
+                f'properties_allow = ["{key}"] en la configuración (su valor seguirá comprobándose).'
+            )
+        if value.startswith("-"):
+            raise ValueError(f"valor de la propiedad {key!r} no válido: no puede empezar por '-' ({value!r})")
+        if value and not _URL.match(value) and (value.startswith(("/", "~", ".")) or "/" in value):
+            if not value.startswith(("/", "~")):
+                if base is None:
+                    raise ValueError(f"la propiedad {key!r} lleva una ruta relativa ({value!r}); usa una absoluta")
+                value = str(base / value)
+            config.safe_path(value, what=f"ruta de la propiedad {key!r}")
 
 
 def _pom_coords(d: Path) -> str | None:
@@ -142,6 +181,11 @@ class MavenParams(LimitParams):
     properties: list[str] = Field(default_factory=list, max_length=20, description="'clave=valor' -> -Dclave=valor.")
     use_wrapper: Literal["auto", "always", "never"] = "auto"
 
+    @field_validator("project_dir")
+    @classmethod
+    def _expand_project_dir(cls, v: str | None) -> str | None:
+        return _expand_dir(v)
+
 
 class MavenBackend(Backend[MavenParams]):
     name = "maven"
@@ -159,14 +203,16 @@ class MavenBackend(Backend[MavenParams]):
             if a.startswith("-") or not _GAV.match(a):
                 raise ValueError(f"artefacto no válido: {a!r}; formato {GAV_FORMAT}")
         check_all(spec.profiles, _PROFILE, what="perfil")
-        check_all(spec.properties, _PROP, what="propiedad")
         bad = [g for g in spec.goals if g not in MAVEN_GOALS]
         if bad:
             raise ValueError(f"objetivos no permitidos: {bad}; permitidos: {list(MAVEN_GOALS)}")
+        d: Path | None = None
         if spec.project_dir:
             d = existing_dir(spec.project_dir, self.config, what="project_dir")
             if not (d / "pom.xml").exists():
                 raise ValueError(f"{d} no tiene pom.xml")
+        _check_properties(spec.properties, self.config, base=d,
+                          allow=list(self.options.get("properties_allow") or []))
         self._mvn(spec)
 
     def _mvn(self, spec: MavenParams) -> str:
@@ -277,6 +323,11 @@ class GradleParams(LimitParams):
     exclude_test: bool = Field(False, description="-x test")
     offline: bool = False
     use_wrapper: Literal["auto", "always", "never"] = "auto"
+
+    @field_validator("project_dir")
+    @classmethod
+    def _expand_project_dir(cls, v: str | None) -> str | None:
+        return _expand_dir(v)
 
 
 class GradleBackend(Backend[GradleParams]):
