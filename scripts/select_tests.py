@@ -73,7 +73,9 @@ NO_TESTS = [
 
 # Módulos concretos -> tests que los ejercitan.
 MAP: dict[str, list[str]] = {
-    "src/watcher_mcp/__main__.py": ["tests/test_server.py"],
+    "src/watcher_mcp/__main__.py": ["tests/test_server.py", "tests/test_cli.py", "tests/test_cli_e2e.py"],
+    "src/watcher_mcp/cli.py": ["tests/test_cli.py", "tests/test_cli_e2e.py", "tests/test_doctor.py"],
+    "src/watcher_mcp/doctor.py": ["tests/test_doctor.py", "tests/test_cli.py", "tests/test_cli_e2e.py"],
     "src/watcher_mcp/busbridge.py": ["tests/test_busbridge.py"],
     "src/watcher_mcp/backends/pip.py": ["tests/test_pip.py", "tests/test_backends.py", "tests/test_revision.py"],
     "src/watcher_mcp/backends/download.py": [
@@ -91,6 +93,8 @@ MAP: dict[str, list[str]] = {
     "src/watcher_mcp/backends/_template.py": ["tests/test_backends.py"],
     # test_limits importa helpers de test_core.
     "tests/test_core.py": ["tests/test_core.py", "tests/test_limits.py"],
+    # test_cli_e2e importa helpers de test_cli.
+    "tests/test_cli.py": ["tests/test_cli.py", "tests/test_cli_e2e.py"],
     "tests/test_report_12_14.py": ["tests/test_report_12_14.py"],
     "tests/test_maven_props.py": ["tests/test_maven_props.py"],
     "tests/test_core_audit.py": ["tests/test_core_audit.py"],
@@ -124,6 +128,7 @@ def select(changed: list[str]) -> str:
 # Pruebas E2E (marcador ``e2e``): herramientas y servicios reales. El resto son puntuales.
 E2E_FILES = frozenset({
     "tests/test_pip.py", "tests/test_web_git_run.py", "tests/test_server.py", "tests/test_network.py",
+    "tests/test_cli_e2e.py",
 })
 
 
