@@ -658,10 +658,10 @@ tests/                   pytest
   procesos se terminan al arrancar la siguiente instancia (en macOS, hasta entonces siguen vivos).
 - `binary` ejecuta el binario descargado para leer su versión: instalar un ejecutable de Internet
   implica confiar en él (el checksum lo da la misma petición).
-- Las rutas dentro de los worktrees de Claude Code (`<repo>/.claude/worktrees/…`), donde trabajan
-  las sesiones lanzadas con worktree, se rechazan porque caen bajo `.claude`, que es zona protegida
-  ([#22](https://github.com/Eliaxs1900/watcher-mcp/issues/22)). Mientras tanto, añade esa carpeta
-  a `allowed_roots` (`allowed_roots = ["~", "~/ruta/al/repo/.claude/worktrees"]`).
+- Filtrar las credenciales del entorno de los jobs no es una barrera completa: un job puede leer el
+  entorno del propio servidor (`ps eww -p $PPID` en macOS, `/proc/$PPID/environ` en Linux). Solo
+  evita que se hereden por descuido; quien ejecuta código arbitrario (un `setup.py`, un `run`) corre
+  con los permisos del usuario.
 - Un proceso que se separa del job con un doble fork (ya adoptado por init antes de cancelar) no se
   puede atribuir al job: si sobrevive a un `cancel`, no se mata.
 - Usa el SDK `mcp` 2.x (`MCPServer`, el sucesor de FastMCP).

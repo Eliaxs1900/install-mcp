@@ -17,6 +17,7 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ResourceNotFoundError, ToolError
 from pydantic import Field
 
+from . import __version__
 from .backends import Backend, load_registry
 from .busbridge import create_bridge
 from .config import Config
@@ -44,7 +45,7 @@ def create_server(
     config = config or Config.load()
     manager = JobManager(config, registry if registry is not None else load_registry(config.plugins))
     manager.load_history()
-    mcp = MCPServer(name="watcher-mcp", instructions=INSTRUCTIONS, version="0.3.1")
+    mcp = MCPServer(name="watcher-mcp", instructions=INSTRUCTIONS, version=__version__)
     notifier = McpNotifier(bus=getattr(mcp, "_subscriptions", None))
     manager.listeners.append(notifier.on_event)
     if bridge := create_bridge(config):  # aviso por sessionbus (opcional, desactivado por defecto)

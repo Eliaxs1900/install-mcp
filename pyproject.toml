@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "watcher-mcp"
-version = "0.3.1"
+version = "0.4.0"
 description = "Servidor MCP que lanza y vigila trabajos largos (instalaciones, descargas, clones, builds y tests) en segundo plano: logs en vivo, aviso de atasco, esperas acotadas e informe al terminar."
 readme = "README.md"
 license = "MIT"
