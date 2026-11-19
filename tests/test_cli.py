@@ -167,6 +167,14 @@ def test_run_command_options_are_not_parsed_as_watcher_options():
     assert args.cmd == ["mvn", "--timeout", "5", "-q"] and args.idle == 7 and args.timeout is None
 
 
+def test_run_password_pairs_are_redacted_in_summary_params_and_job_json(capsys, state):
+    cli(capsys, state, "run", "-q", "--", "true", "--password", "hunter2hunter2")  # programa corto: el resumen se corta a 80
+    (job_id,) = job_ids(state)
+    for name in ("job.json", "report.json", "output.log"):
+        assert "hunter2hunter2" not in (state / "jobs" / job_id / name).read_text(), name
+    assert "--password ***" in json.loads((state / "jobs" / job_id / "job.json").read_text())["summary"]
+
+
 def test_run_secrets_in_arguments_are_redacted(capsys, state):
     _, _, err = cli(capsys, state, "run", "--", PY, "-c", "print('token=abc123def456ghi')")
     (job_id,) = job_ids(state)

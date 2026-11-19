@@ -19,8 +19,23 @@ from urllib.parse import urlsplit
 
 REDACTED = "***"
 # Claves cuyo valor es un secreto en estructuras (parámetros de un job): se ocultan por nombre,
-# porque los patrones de texto (``clave=valor``) no casan con JSON (``"clave": "valor"``).
-SECRET_KEY = re.compile(r"(?i)(token|password|passwd|pwd|secret|api[_-]?key|access[_-]?key|credential|auth)")
+# porque los patrones de texto (``clave=valor``) no casan con JSON (``"clave": "valor"``). Se compara por
+# PALABRAS (separadas por ``_``, ``-``, ``.`` o mayúsculas de camelCase), no por subcadena: ``api_token`` y
+# ``accessKey`` sí, pero ``oauthlib``, ``tokenizers`` o ``author`` no.
+_SECRET_WORDS = frozenset({
+    "token", "tokens", "password", "passwords", "passwd", "pwd", "secret", "secrets", "credential", "credentials",
+    "auth", "authorization", "apikey", "accesskey", "privatekey", "passphrase",
+})
+_SECRET_PAIRS = frozenset({("api", "key"), ("access", "key"), ("private", "key"), ("secret", "key")})
+# Mapas cuyas claves son datos y no nombres de campo (paquete -> versión): ahí NO se oculta por clave
+# (``google-auth: 2.30`` no es un secreto), solo se redactan los valores como texto.
+PLAIN_MAPS = frozenset({"installed", "dists", "versions"})
+
+
+def is_secret_key(name: str) -> bool:
+    words = re.findall(r"[a-z0-9]+", re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name).lower())
+    return any(w in _SECRET_WORDS for w in words) or any(pair in _SECRET_PAIRS for pair in zip(words, words[1:]))
+
 
 # Palabras que delatan una clave secreta (``token``, ``password``...).
 _KEYWORDS = r"token|password|passwd|pwd|secret|api[_-]?key|access[_-]?key"
@@ -128,17 +143,28 @@ class Redactor:
                 hide = "option"
         return out
 
-    def redact_obj(self, obj: Any) -> Any:
-        """Copia de una estructura (dict/list/str) con los secretos ocultos: por nombre de clave
-        y, en el resto de textos, con los mismos patrones y literales que los logs."""
+    def redact_obj(self, obj: Any, *, _by_key: bool = True) -> Any:
+        """Copia de una estructura (dict/list/str) con los secretos ocultos: por nombre de clave, en las
+        listas de argumentos (``argv``/``command``/``args``) también el valor que sigue a ``--password``, y
+        en el resto de textos con los mismos patrones y literales que los logs."""
         if isinstance(obj, dict):
-            return {
-                k: (REDACTED if isinstance(k, str) and SECRET_KEY.search(k) and isinstance(v, str) and v
-                    else self.redact_obj(v))
-                for k, v in obj.items()
-            }
+            program = obj.get("program") if isinstance(obj.get("program"), str) else ""
+            out: dict[Any, Any] = {}
+            for k, v in obj.items():
+                if isinstance(k, str) and isinstance(v, list) and all(isinstance(a, str) for a in v):
+                    if k in ("argv", "command"):
+                        out[k] = self.argv(v)
+                        continue
+                    if k == "args":  # sin el programa: el de al lado (``program``), si lo hay
+                        out[k] = self.argv([program, *v])[1:]
+                        continue
+                if _by_key and isinstance(k, str) and isinstance(v, str) and v and is_secret_key(k):
+                    out[k] = REDACTED
+                else:
+                    out[k] = self.redact_obj(v, _by_key=_by_key and not (isinstance(k, str) and k in PLAIN_MAPS))
+            return out
         if isinstance(obj, list):
-            return [self.redact_obj(v) for v in obj]
+            return [self.redact_obj(v, _by_key=_by_key) for v in obj]
         if isinstance(obj, str):
             return self(obj)
         return obj
@@ -280,6 +306,71 @@ def _hidden_component(relative: tuple[str, ...]) -> str | None:
             i += 3
             continue
         i += 1
+    return None
+
+
+# Nombres ocultos que un archivo no puede crear dentro de su destino aunque el destino sea una carpeta de
+# trabajo: credenciales y configuración que se aplican solas (``.npmrc`` con registro, ``.yarnrc.yml`` con
+# ``yarnPath``, ``.claude/settings*``...). Los demás ocultos de un tarball normal (``.gitignore``,
+# ``.github/``, ``.editorconfig``...) sí se extraen.
+SENSITIVE_MEMBER_NAMES = frozenset({
+    ".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".config", ".netrc", ".npmrc", ".pypirc", ".yarnrc",
+    ".yarnrc.yml", ".pgpass", ".my.cnf", ".claude",
+})
+_SENSITIVE_GIT_PARTS = frozenset({"hooks", "config"})  # ``.git/hooks/*`` se ejecutan; ``.git/config`` define filtros
+
+
+def ensure_safe_member(
+    path: str | Path,
+    dest: str | Path,
+    roots: Iterable[Path],
+    *,
+    what: str = "miembro del archivo",
+    home: Path | None = None,
+    protected_home_dirs: Iterable[str] = (),
+    protect_dot_paths: bool = True,
+) -> Path:
+    """Valida el destino final de un miembro de un archivo extraído en ``dest`` (ya validado como ruta).
+
+    Criterio, por zonas y no por «cualquier punto»:
+
+    * siempre: dentro de las raíces y fuera de ``protected_home_dirs`` (``Library/LaunchAgents``...);
+    * si ``dest`` es HOME o un ancestro de HOME: ningún componente oculto (cualquier ``.zshrc``,
+      ``.gitconfig``, ``.ssh``... de HOME es configuración personal o se ejecuta);
+    * si ``dest`` está dentro de HOME o fuera de él (una carpeta de trabajo): los ocultos por debajo de
+      ``dest`` se aceptan (``.gitignore``, ``.github/``) salvo ``SENSITIVE_MEMBER_NAMES`` y ``.git/hooks``,
+      ``.git/config``.
+    """
+    roots = list(roots)
+    resolved = ensure_safe_path(path, roots, what=what, home=home, protected_home_dirs=protected_home_dirs,
+                                protect_dot_paths=False)
+    if not protect_dot_paths:
+        return resolved
+    dest_resolved = Path(dest).expanduser().resolve()
+    home_resolved = (home or Path.home()).expanduser().resolve()
+    relative = resolved.relative_to(dest_resolved).parts if (
+        resolved == dest_resolved or resolved.is_relative_to(dest_resolved)) else resolved.parts
+    if dest_resolved == home_resolved or home_resolved.is_relative_to(dest_resolved):
+        blocked = _hidden_component(relative)
+        why = "un componente oculto de HOME (configuración personal o que se ejecuta al iniciar sesión)"
+    else:
+        blocked = _sensitive_member_component(relative)
+        why = "una zona sensible (credenciales, configuración o hooks que se aplican solos)"
+    if blocked is not None:
+        raise ValueError(
+            f"El {what} {str(resolved)!r} pasa por {blocked!r}, {why}. Extrae el archivo en una carpeta de "
+            f"trabajo (no en HOME) o sin ese miembro."
+        )
+    return resolved
+
+
+def _sensitive_member_component(relative: tuple[str, ...]) -> str | None:
+    lowered = [part.lower() for part in relative]
+    for i, part in enumerate(lowered):
+        if part in SENSITIVE_MEMBER_NAMES:
+            return relative[i]
+        if part == ".git" and i + 1 < len(lowered) and lowered[i + 1] in _SENSITIVE_GIT_PARTS:
+            return f"{relative[i]}/{relative[i + 1]}"
     return None
 
 

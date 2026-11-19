@@ -496,7 +496,10 @@ backend `apt` (`binwalk`, `squashfs-tools`, `p7zip-full`), que requiere
    (`https://user:pass@` → `https://***@`), `token=`, `password=`, `api_key=`,
    `Authorization:`, tokens con formato conocido (GitHub, GitLab, AWS, Slack, `sk-…`),
    patrones extra de la configuración y literales concretos que declara cada plan
-   (entre ellos los valores heredados con `inherit_env`/`env_from`). Los patrones de clave/valor
+   (entre ellos los valores heredados con `inherit_env`/`env_from`). Por estructura, las claves se comparan por PALABRAS (`api_token`, `accessKey`; no `oauthlib` ni
+   `tokenizers`) y no se aplican a mapas de datos como `installed` (`google-auth`); las listas
+   `argv`/`command`/`args` pasan por `Redactor.argv` para ocultar el valor tras `--password`/`--token`.
+   Los patrones de clave/valor
    cubren valores entrecomillados con espacios y JSON (`"password": "x"`); en el argv también el valor
    tras `--password`/`--token`… y `-p`/`-u` en `sshpass`/`curl`/`mysql`. Se aplican sobre cada línea en el
    bucle de eventos, así que no pueden tener coste cuadrático: empiezan al principio de un
@@ -506,7 +509,9 @@ backend `apt` (`binwalk`, `squashfs-tools`, `p7zip-full`), que requiere
    (`Checksum.parse("sha256:…").verify_file()`), obligatorio para binarios sueltos. La descarga
    lee con `read1` y comprueba cancelación y timeout en cada trozo (un servidor que gotea bytes no
    la bloquea). La extracción valida **todo** el archivo antes de escribir (cada miembro ya resuelto
-   pasa por raíces y zonas protegidas), extrae a una carpeta temporal dentro del destino y solo al
+   pasa por raíces y zonas protegidas; criterio por zonas, no por «cualquier punto»: en HOME ningún
+   oculto, en una carpeta de trabajo los inocuos como `.gitignore` o `.github/` sí y una lista corta
+   de nombres sensibles —`.ssh`, `.npmrc`, `.claude`, `.git/hooks`…— no; ver `ensure_safe_member`), extrae a una carpeta temporal dentro del destino y solo al
    final mueve; lo que se pisa con `overwrite=true` se aparta antes y se restaura si algo falla.
 8. **Sin interacción**: `stdin` es `/dev/null`; se fijan `PIP_NO_INPUT`,
    `GIT_TERMINAL_PROMPT=0`, `DEBIAN_FRONTEND=noninteractive`, etc.
@@ -542,9 +547,14 @@ backend `apt` (`binwalk`, `squashfs-tools`, `p7zip-full`), que requiere
     emitir.
 
 Lo que **no** cubre el prototipo: aislamiento del sistema de ficheros (sandbox),
-límites de CPU/memoria. El `requirements.txt` se valida antes de lanzar pip (solo requisitos
-sin URL y opciones verificables, recursivamente); queda una ventana entre esa validación y la
-ejecución en la que quien pueda escribir el fichero puede cambiarlo.
+límites de CPU/memoria. El `requirements.txt` no se le pasa a pip: validar el original no basta
+(validador y pip pueden interpretar distinto una línea, p. ej. un comentario que acaba en `\`, y el
+fichero puede cambiar mientras el job espera en la cola). Un paso `requirements` previo lo lee una vez
+con el mismo criterio de unión de líneas que pip, valida cada línea (recursivamente), aplana los `-r`,
+separa los `-c` y escribe una copia normalizada y privada (0700/0600) en `<state_dir>/requirements/<id>/`;
+pip recibe esa copia. Las copias de más de un día se podan. Límite que queda: el propio `state_dir` es raíz
+permitida, así que un job que escribiera ahí podría cambiar la copia en los milisegundos entre su escritura
+y la lectura de pip.
 
 ## 9. Cómo añadir un backend
 

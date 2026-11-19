@@ -22,6 +22,7 @@ from pydantic import Field
 
 from ..envsource import check_env_names
 from ..process import SERVER_ONLY_ENV, is_server_only
+from ..security import Redactor
 from .base import Backend, CommandStep, Plan, Probe
 from .common import LimitParams, check_all, existing_dir, is_root
 
@@ -364,7 +365,10 @@ class RunBackend(Backend[RunParams]):
         rule = self.match(spec, cwd)
         # [backends.run] inherit_env (y el global) los añade el núcleo; aquí, los de la regla.
         inherit = list(rule.inherit_env) if rule else []
-        summary = f"{spec.program} {' '.join(spec.args)[:80]} (en {cwd})"
+        # El resumen sale al cliente y a job.json: ``--password X`` va en dos argumentos y el redactor solo lo
+        # ve si recibe el argv entero.
+        shown = Redactor(self.config.redact_patterns).argv([spec.program, *spec.args])
+        summary = f"{' '.join(shown)[:80]} (en {cwd})"
         if rule is not None:
             summary += f" [regla commands[{rule.index}]]"
         return Plan(
