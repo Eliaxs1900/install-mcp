@@ -127,6 +127,7 @@ flowchart LR
     J --> P["process.py<br/>exec sin shell · pipe/pty<br/>SIGTERM → SIGKILL"]
     J --> B["backends/<br/>web: download · binary<br/>código: pip · git · npm · cargo · go · maven · gradle<br/>sistema: brew · apt · docker · run"]
     J -. "output.log · job.json<br/>report.json" .-> D[("~/.local/state/<br/>watcher-mcp")]
+    J -. "fin del job (opcional)<br/>busbridge.py" .-> SB["sessionbus<br/>(aviso a la sesión<br/>que lo lanzó)"]
 ```
 
 - **Backends como planificadores puros**: un backend solo valida parámetros y devuelve
@@ -149,9 +150,17 @@ flowchart LR
     tamaño y de número de ficheros;
   - `git` neutraliza la configuración local del repo (hooks, fsmonitor, credential helpers) y no
     actualiza repos que no clonó salvo `trust_existing: true`;
+  - `maven` rechaza las propiedades `-D` que son rutas de salida o de configuración (`outputFile`,
+    `maven.repo.local`, `argLine`…), y cualquier valor con forma de ruta pasa por las raíces y las
+    zonas protegidas;
   - `npm` sin scripts de instalación por defecto; `run` con allowlist de programas o reglas por
     prefijo de argumentos y carpeta, y lista de variables de entorno permitidas; los secretos se
     heredan por nombre (`inherit_env`/`env_from`) y su valor se redacta;
+  - los jobs no heredan las credenciales con las que la app habla con el servidor (mensajería entre
+    sesiones, OAuth) ni los datos de la cuenta: un `setup.py` cualquiera no puede leerlas. El resto
+    del entorno (PATH, HOME, proxies…) sí se hereda;
+  - cancelar o agotar el tiempo termina el grupo de procesos y también a los descendientes que se
+    habían separado de él (`setsid`);
   - solo HTTPS;
   - redacción de tokens y contraseñas en logs, argv, informes y parámetros guardados.
 - **Varias sesiones a la vez**: cada sesión de Claude Code arranca su propio servidor y todos
@@ -332,7 +341,7 @@ comprobaciones (útil en CI).
 | `list_jobs(state?, limit=20)` | Jobs recientes. |
 | `logs(job_id, tail=50, since_seq?, stream=all)` | Últimas líneas; con `since_seq`, solo las nuevas. |
 | `wait(job_id, timeout_s?)` | Espera acotada (60 s por defecto, tope duro 300 s): el informe, o "sigue en curso" con pid y últimas líneas. Emite `notifications/progress`. |
-| `cancel(job_id)` | Cancela (SIGTERM y luego SIGKILL al grupo de procesos). |
+| `cancel(job_id)` | Cancela: SIGTERM y luego SIGKILL al grupo de procesos y a los hijos que se habían separado de él con `setsid`. |
 
 Recursos: `job://<id>` (estado + informe) y `jobs://list`. Los avisos van a quien lanzó
 el job (`notifications/message`, con el informe en `data.report`) y a quien esté
@@ -440,7 +449,7 @@ configuración (`[backends.pip] job_timeout_s = 1800`) o globalmente.
 
 Ver [examples/config.example.toml](examples/config.example.toml):
 
-- `allowed_backends`: la allowlist (por defecto solo `pip`).
+- `allowed_backends`: la allowlist (por defecto, todos menos `apt` y `run`; ver [Backends](#backends)).
 - `allow_privileged`: `false` por defecto.
 - `allowed_roots`: dónde pueden escribir (y leer ficheros pedidos) los backends.
 - `protect_dot_paths` (`true`) y `protected_home_dirs` (subrutas de HOME con comodines; por defecto
@@ -459,6 +468,38 @@ Ver [examples/config.example.toml](examples/config.example.toml):
 
 `WATCHER_MCP_STATE_DIR` cambia el directorio de estado (por defecto
 `~/.local/state/watcher-mcp`).
+
+### Aviso por sessionbus (opcional)
+
+Claude Code no le enseña al modelo las `notifications/message` de MCP: la sesión que lanzó un job
+no se entera de que terminó hasta que llama a `wait`/`status`. Con
+[sessionbus](https://github.com/Eliaxs1900/sessionbus-mcp) instalado, watcher-mcp puede publicar el
+fin del job en el bus y el hook de sessionbus se lo inyecta a esa sesión. Está **desactivado por
+defecto** y watcher-mcp no depende de sessionbus:
+
+```toml
+[sessionbus]
+enabled = true
+# command = ["/ruta/a/sessionbus"]     # por defecto: `sessionbus` en el PATH o
+#                                      # ~/Desktop/sessionbus-mcp/.venv/bin/sessionbus
+# events = ["finished", "stalled"]     # por defecto solo ["finished"]
+# priorities = { succeeded = "normal", failed = "alerta" }   # ver la tabla de abajo
+```
+
+Qué llega: una trama `info` en `nodo/<sesión que lanzó el job>/jobs/<job_id>` (solo a esa sesión,
+nunca a `todos/**`; caduca en un día), con el titular del informe como resumen (≤ 200 caracteres) y
+en el cuerpo (≤ 16 KB, redactado) el estado, `exit_code`, la duración, el `error`, las
+`relevant_lines`, `log_file` y `job://<id>`. Prioridades por defecto: `normal` si termina bien o se
+cancela, `alerta` si falla, se agota el tiempo o se atasca (`baja` no se inyecta nunca en la sesión,
+solo queda en su bandeja).
+
+Cómo funciona: cada sesión de Claude Code arranca su propio servidor; su
+`CLAUDE_CODE_HOST_SESSION_ID` (o `CLAUDE_CODE_SESSION_ID`) es el nodo del bus. El aviso sale con un
+subproceso `sessionbus publish` (sin shell, `timeout_s` ≤ 5 s, en segundo plano) lanzado **sin esas
+variables** y con `SESSIONBUS_NODE_NAME=watcher-mcp`; el remitente es `cli-watcher-mcp`. (Si
+publicara como la propia sesión, el bus no se lo entregaría a ella.) Si falta el CLI o la identidad,
+se cuelga o falla, el job termina igual y a tiempo: el fallo solo queda en el log del job y en
+stderr (la falta de identidad se dice una sola vez).
 
 ## Pruebas selectivas: puntuales y E2E
 
@@ -498,11 +539,15 @@ docker build --target test -t watcher-mcp:test .
 docker run --rm watcher-mcp:test
 ```
 
-Son 69 tests sin red:
+Los tests sin red (más de 200) cubren:
 - núcleo: jobs en paralelo, logs en vivo, cancelación, `stalled`, `timed_out`, `wait`
   acotado, pipe frente a pty, notificaciones de punta a punta por MCP y redacción de
   secretos;
-- validación y plan de los 13 backends;
+- procesos: líneas de más de 8 KiB sin pérdida, sondas con tope de salida, hijos que se separan
+  del grupo con `setsid` y entorno de los jobs sin las credenciales del servidor;
+- el informe de fallo: la causa antes que la traza (Maven, Gradle, Python, npm) y `built`/`stale`;
+- validación y plan de los 13 backends, incluidas las propiedades `-D` de Maven;
+- el aviso por sessionbus, con un CLI falso;
 - instalaciones reales offline: pip/uv con un wheel local, git con repos locales,
   descargas y binarios contra un servidor HTTPS local (checksum, extracción segura,
   redirección a http rechazada, atasco y cancelación) y `run`.
@@ -539,6 +584,7 @@ src/watcher_mcp/
   logsummary.py          relevant_lines: causa del fallo sin trazas ni texto de ayuda
   process.py             exec sin shell, lectura en vivo (pipe/pty/stdbuf), terminación acotada
   notify.py              eventos -> notifications/message, resources/updated, subscriptions/listen
+  busbridge.py           aviso opcional del fin de job por sessionbus (desactivado por defecto)
   security.py            redacción, https, checksums, raíces permitidas
   config.py              configuración
   backends/base.py       interfaz Backend / Plan / CommandStep / FuncStep
@@ -564,6 +610,12 @@ tests/                   pytest
   procesos se terminan al arrancar la siguiente instancia (en macOS, hasta entonces siguen vivos).
 - `binary` ejecuta el binario descargado para leer su versión: instalar un ejecutable de Internet
   implica confiar en él (el checksum lo da la misma petición).
+- Las rutas dentro de los worktrees de Claude Code (`<repo>/.claude/worktrees/…`), donde trabajan
+  las sesiones lanzadas con worktree, se rechazan porque caen bajo `.claude`, que es zona protegida
+  ([#22](https://github.com/Eliaxs1900/watcher-mcp/issues/22)). Mientras tanto, añade esa carpeta
+  a `allowed_roots` (`allowed_roots = ["~", "~/ruta/al/repo/.claude/worktrees"]`).
+- Un proceso que se separa del job con un doble fork (ya adoptado por init antes de cancelar) no se
+  puede atribuir al job: si sobrevive a un `cancel`, no se mata.
 - Usa el SDK `mcp` 2.x (`MCPServer`, el sucesor de FastMCP).
 
 ## Licencia

@@ -76,6 +76,7 @@ MAP: dict[str, list[str]] = {
     "src/watcher_mcp/__main__.py": ["tests/test_server.py", "tests/test_cli.py", "tests/test_cli_e2e.py"],
     "src/watcher_mcp/cli.py": ["tests/test_cli.py", "tests/test_cli_e2e.py", "tests/test_doctor.py"],
     "src/watcher_mcp/doctor.py": ["tests/test_doctor.py", "tests/test_cli.py", "tests/test_cli_e2e.py"],
+    "src/watcher_mcp/busbridge.py": ["tests/test_busbridge.py"],
     "src/watcher_mcp/backends/pip.py": ["tests/test_pip.py", "tests/test_backends.py", "tests/test_revision.py"],
     "src/watcher_mcp/backends/download.py": [
         "tests/test_web_git_run.py", "tests/test_backends.py", "tests/test_revision.py", "tests/test_network.py",
@@ -87,6 +88,7 @@ MAP: dict[str, list[str]] = {
     "src/watcher_mcp/backends/ecosystems.py": ["tests/test_backends.py", "tests/test_revision.py"],
     "src/watcher_mcp/backends/jvm.py": [
         "tests/test_backends.py", "tests/test_revision.py", "tests/test_issues_4_5.py", "tests/test_report_12_14.py",
+        "tests/test_maven_props.py",
     ],
     "src/watcher_mcp/backends/_template.py": ["tests/test_backends.py"],
     # test_limits importa helpers de test_core.
@@ -94,6 +96,7 @@ MAP: dict[str, list[str]] = {
     # test_cli_e2e importa helpers de test_cli.
     "tests/test_cli.py": ["tests/test_cli.py", "tests/test_cli_e2e.py"],
     "tests/test_report_12_14.py": ["tests/test_report_12_14.py"],
+    "tests/test_maven_props.py": ["tests/test_maven_props.py"],
     "tests/test_select_tests.py": ["tests/test_select_tests.py"],
 }
 

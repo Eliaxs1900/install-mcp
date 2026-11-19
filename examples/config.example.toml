@@ -93,3 +93,13 @@ prefer_uv = true
 
 # [backends.apt]                    # requiere allow_privileged = true y "apt" en allowed_backends
 # stall_timeout_s = 600
+
+# Aviso del fin de job (y, opcional, de atascos) a la sesión que lo lanzó, por sessionbus. Desactivado
+# por defecto. Ver README ("Aviso por sessionbus").
+# [sessionbus]
+# enabled = true
+# command = ["/ruta/a/sessionbus"]   # por defecto: `sessionbus` en el PATH o ~/Desktop/sessionbus-mcp/.venv/bin/sessionbus
+# events = ["finished"]              # o ["finished", "stalled"]
+# priorities = { succeeded = "normal", cancelled = "normal", failed = "alerta", timed_out = "alerta", stalled = "alerta" }
+# timeout_s = 5                      # tope duro 5 s
+# ttl_s = 86400
