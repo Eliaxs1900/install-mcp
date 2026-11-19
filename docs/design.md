@@ -109,12 +109,16 @@ Estados: `queued`, `running`, `stalled` (no terminales) y `succeeded`, `failed`,
   procesos huérfanos. Al arrancar, los jobs que quedaron `running` en disco se
   marcan `failed` ("interrumpido").
 - **Retención**: se guardan los últimos `max_jobs_kept` jobs terminados. Además se borran las
-  carpetas de `jobs/` sin `job.json` legible y sin actividad desde hace más de 7 días (caída
-  entre crear la carpeta y guardar el job, versión incompatible).
+  carpetas de `jobs/` cuyo `job.json` falta o no es JSON y sin actividad desde hace más de 7 días
+  (caída entre crear la carpeta y guardar el job). Nunca se borra una carpeta con un `job.json`
+  legible, aunque este servidor aún no la haya cargado (puede ser un job de otra sesión): primero
+  se incorporan los jobs nuevos y la retención normal es cosa de `max_jobs_kept`.
 - **Varias sesiones**: `get`, `list` y `wait` vuelven a leer del disco los jobs `foreign` (en
   curso en otra sesión viva): al terminar allí se reflejan aquí, y si su dueño muere se marcan
   `failed` ("interrumpido"). Los jobs que otra sesión lanza después de arrancar este servidor
-  también se ven (`get` por id, `list` reescanea). `wait` sobre un job ajeno sondea el disco.
+  también se ven (`get` por id, `list` reescanea). `wait` sobre un job ajeno sondea el disco, pero solo `job.json`: el log
+  (que puede pesar gigas) no se relee en cada sondeo; el cursor `log_lines` sale de `job.json` y se lee
+  el fichero solo al pedir `logs`.
 
 ### Logs
 
@@ -146,7 +150,9 @@ Cada línea es `<ISO-8601 UTC> <stream> | <texto>` con `stream` ∈ `stdout`,
   escapan como `\n`, para que `seq` y el fichero no se desincronicen.
 - **Tope en disco**: `max_log_bytes` (256 MiB por defecto; 0 = sin tope). Al superarlo se deja
   de escribir `output.log` (queda una línea `log truncado…`) pero el job sigue vigilado y la
-  memoria sigue recibiendo líneas.
+  memoria sigue recibiendo líneas. Con el log truncado, `logs`, `log_tail` y `relevant_lines` del
+  informe usan el **final** (la memoria, que sí llegó hasta el último evento) y del disco solo el
+  principio anterior al corte; el informe lo dice (`log_truncated`) y `job.json` lo guarda.
 - **Seguimiento incremental**: cada línea tiene un `seq`. `logs(job_id, since_seq=N)`
   devuelve solo lo nuevo; `last_seq` es el cursor para la siguiente llamada.
 
@@ -529,7 +535,7 @@ backend `apt` (`binwalk`, `squashfs-tools`, `p7zip-full`), que requiere
 11. **Procesos fuera del grupo**: al cancelar o agotar el tiempo, antes de señalar se fotografía el
     árbol de descendientes (`ps`) y, tras el barrido del grupo, se termina (SIGTERM, gracia,
     SIGKILL) a los que habían hecho `setsid`/creado su grupo (servidores de desarrollo, daemons de
-    build): se anota en el log del job y, si ni SIGKILL los mata, salen en `orphans`. Límites: un
+    build): se anota en el log del job y, si ni SIGKILL los mata, salen en `orphans`. Los terminados llegan al informe como `escaped` (y al titular). Límites: un
     proceso que ya se había desvinculado de su padre (doble `fork`) no aparece en el árbol y no se
     puede atribuir de forma fiable; con el job terminado con éxito no se toca a nadie.
 12. **Salida acotada**: las sondas de versión (`run_capture`) leen como mucho `MAX_CAPTURE_BYTES`

@@ -208,6 +208,8 @@ class Job:
         # Procesos del grupo que ignoraron SIGTERM y se mataron con SIGKILL, y los que ni así murieron.
         self.killed_procs: list[int] = []
         self.orphans: list[int] = []
+        # Descendientes que habían salido del grupo (setsid) y se terminaron al cancelar/vencer.
+        self.escaped: list[int] = []
         self.dir = directory
         self._lines: deque[LogLine] = deque(maxlen=memory_lines)
         self._seq = 0
@@ -217,6 +219,7 @@ class Job:
         self.max_log_bytes = max_log_bytes
         self._log_bytes = 0
         self.log_truncated = False
+        self._cut_seq = 0  # seq de la línea que ocupa la nota «log truncado» en el disco
         self.done = asyncio.Event()
         self.cancel_event = asyncio.Event()
         self.lines_in_step = 0
@@ -276,6 +279,7 @@ class Job:
         self._log_bytes += len(data.encode("utf-8", errors="replace"))
         if self.max_log_bytes and self._log_bytes > self.max_log_bytes:
             self.log_truncated = True
+            self._cut_seq = line.seq
             assert self._fh is not None
             self._fh.write(LogLine(line.seq, line.ts, "core",
                                    f"log truncado en disco: se alcanzó max_log_bytes ({self.max_log_bytes} bytes); "
@@ -283,6 +287,24 @@ class Job:
             return
         assert self._fh is not None
         self._fh.write(data)
+
+    def _disk_lines(self, n: int, since_seq: int | None, stream: str | None, below: int | None = None) -> list[LogLine]:
+        """Últimas ``n`` líneas del fichero (con ``seq`` > ``since_seq`` y < ``below``). Recorrido en
+        streaming quedándose solo con las últimas n: memoria O(n) aunque el log ocupe gigas."""
+        selected: deque[LogLine] = deque(maxlen=max(n, 0))
+        count = 0
+        with open(self.log_path, encoding="utf-8", errors="replace") as fh:
+            for i, raw in enumerate(fh, start=1):
+                count = i
+                if (since_seq is not None and i <= since_seq) or n <= 0 or (below is not None and i >= below):
+                    continue
+                line = LogLine.parse(i, raw)
+                if stream and stream != "all" and line.stream != stream:
+                    continue
+                selected.append(line)
+        if self.foreign and below is None:
+            self._seq = max(self._seq, count)  # el cursor de un job ajeno se conoce al leer su log, no antes
+        return list(selected)
 
     def tail(self, n: int, since_seq: int | None = None, stream: str | None = None) -> list[LogLine]:
         lines: list[LogLine] = list(self._lines)
@@ -293,20 +315,15 @@ class Job:
             or (not lines and self.log_path.exists())
         )
         if need_disk and self.log_path.exists():
-            # Recorrido en streaming quedándose solo con las últimas n que encajan: memoria O(n)
-            # aunque el log ocupe gigas (antes se cargaba el fichero entero en cada consulta).
-            selected: deque[LogLine] = deque(maxlen=max(n, 0))
-            with open(self.log_path, encoding="utf-8", errors="replace") as fh:
-                for i, raw in enumerate(fh, start=1):
-                    if since_seq is not None and i <= since_seq:
-                        continue
-                    if n <= 0:
-                        continue
-                    line = LogLine.parse(i, raw)
-                    if stream and stream != "all" and line.stream != stream:
-                        continue
-                    selected.append(line)
-            return list(selected)
+            if self.log_truncated and lines:
+                # El fichero solo tiene el principio (hasta el corte) y la memoria el final: el final
+                # real sale de la memoria; del disco solo lo anterior, sin la nota del corte.
+                below = min(oldest_mem, self._cut_seq) if self._cut_seq else oldest_mem
+                mem = [ln for ln in lines if (since_seq is None or ln.seq > since_seq)
+                       and not (stream and stream != "all" and ln.stream != stream)]
+                head = self._disk_lines(max(n - len(mem), 0), since_seq, stream, below=below)
+                return (head + mem)[-n:] if n > 0 else []
+            return self._disk_lines(n, since_seq, stream)
         if since_seq is not None:
             lines = [ln for ln in lines if ln.seq > since_seq]
         if stream and stream != "all":
@@ -362,6 +379,7 @@ class Job:
             "limits": self.limits.to_dict(),
             "stalls": self.stalls,
             "log_lines": self._seq,
+            "log_truncated": self.log_truncated,
             "log_file": str(self.log_path),
             "params": self.params,
             "owner": self.owner,
@@ -387,17 +405,17 @@ class Job:
         tmp.replace(self.dir / "job.json")
 
     @classmethod
-    def from_disk(cls, directory: Path, redactor: Redactor, memory_lines: int) -> Job | None:
+    def from_disk(cls, directory: Path, redactor: Redactor, memory_lines: int, *, count_log: bool = True) -> Job | None:
         """Carga un job persistido tal cual. Nunca lanza: un job.json ilegible o de otra versión
         se omite con un aviso en vez de impedir que arranque el servidor."""
         try:
-            return cls._from_disk(directory, redactor, memory_lines)
+            return cls._from_disk(directory, redactor, memory_lines, count_log)
         except Exception as exc:
             log.warning("job en %s omitido: no se pudo cargar (%r)", directory, exc)
             return None
 
     @classmethod
-    def _from_disk(cls, directory: Path, redactor: Redactor, memory_lines: int) -> Job | None:
+    def _from_disk(cls, directory: Path, redactor: Redactor, memory_lines: int, count_log: bool = True) -> Job | None:
         try:
             data = json.loads((directory / "job.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -424,7 +442,11 @@ class Job:
             job.state = JobState(data["state"])
         except ValueError:
             job.state = JobState.FAILED
-        if job.log_path.exists():
+        job.log_truncated = bool(data.get("log_truncated"))
+        published = data.get("log_lines")
+        if isinstance(published, int) and (job.state in TERMINAL or not count_log):
+            job._seq = published  # job.json ya lo dice: no hace falta recorrer un log que puede pesar gigas
+        elif job.log_path.exists():
             with open(job.log_path, encoding="utf-8", errors="replace") as fh:
                 job._seq = sum(1 for _ in fh)
         with contextlib.suppress(OSError, ValueError):
@@ -717,12 +739,15 @@ class JobManager:
         refleja aquí; si su dueño murió, se trata como huérfano. Sin esto quedaría ``running`` siempre."""
         if not job.foreign:
             return
-        fresh = Job.from_disk(job.dir, self.redactor, self.config.memory_log_lines)
+        # Solo job.json (y report.json): el log no se relee en cada sondeo; se lee al pedir ``logs``.
+        fresh = Job.from_disk(job.dir, self.redactor, self.config.memory_log_lines, count_log=False)
         if fresh is None:
             return
         for attr in ("state", "exit_code", "_error", "installed", "stalls", "steps", "report", "started_at",
-                     "finished_at", "pid", "pid_started_at", "current_command", "current_step", "_seq", "summary"):
+                     "finished_at", "pid", "pid_started_at", "current_command", "current_step", "summary",
+                     "log_truncated"):
             setattr(job, attr, getattr(fresh, attr))
+        job._seq = max(job._seq, fresh._seq)
         if job.state in TERMINAL:
             job.foreign = False
             job.done.set()
@@ -741,14 +766,24 @@ class JobManager:
                 self._adopt(job)
 
     def _sweep_unreadable(self) -> None:
-        """Borra las carpetas de job sin ``job.json`` legible y sin actividad desde hace días (caída
-        entre ``mkdir`` y ``persist``, versión incompatible): no son jobs conocidos y nunca se podarían."""
+        """Borra las carpetas de job cuyo ``job.json`` falta o no es JSON y sin actividad desde hace
+        días (caída entre ``mkdir`` y ``persist``): no son jobs y nunca se podarían. Nunca borra un job
+        legible, aunque este servidor aún no lo haya cargado (puede ser de otra sesión): esos los
+        incorpora ``_scan_new`` y la retención normal es cosa de ``_prune``. Ante la duda, no se borra."""
+        self._scan_new()
         try:
             dirs = [d for d in self.config.jobs_dir.iterdir() if d.is_dir() and d.name not in self.jobs]
         except OSError:
             return
         now = time.time()
         for d in dirs:
+            try:
+                json.loads((d / "job.json").read_text(encoding="utf-8"))
+                continue  # legible: es un job (quizá de una versión que no entendemos); no se toca
+            except (FileNotFoundError, ValueError):
+                pass  # sin job.json o con basura (UnicodeDecodeError y JSONDecodeError son ValueError)
+            except OSError:
+                continue  # no se puede leer ahora mismo: ante la duda, no se borra
             try:
                 newest = max([d.stat().st_mtime, *(p.stat().st_mtime for p in d.iterdir())])
             except OSError:
@@ -1053,6 +1088,8 @@ class JobManager:
             job.killed_procs += res.killed
             job.add_line("core", f"{len(res.killed)} proceso(s) del grupo ignoraron SIGTERM y se mataron con "
                                  f"SIGKILL: pid {', '.join(map(str, res.killed))}")
+        if res.escaped:
+            job.escaped += res.escaped
         if res.survivors:
             job.orphans += res.survivors
             job.add_line("core", f"AVISO: siguen vivos procesos del grupo tras SIGKILL: pid "
@@ -1286,8 +1323,12 @@ class JobManager:
             headline += f" · {summary['headline']}"
         if job.killed_procs:
             headline += f" · {len(job.killed_procs)} hijo(s) ignoraron SIGTERM y se mataron con SIGKILL"
+        if job.escaped:
+            headline += f" · {len(job.escaped)} proceso(s) escaparon del grupo (setsid) y se terminaron"
         if job.orphans:
             headline += f" · ATENCIÓN: quedan vivos pid {', '.join(map(str, job.orphans))}"
+        if job.log_truncated:
+            headline += " · log truncado en disco (max_log_bytes)"
         recent = wide[-400:]
         report: dict[str, Any] = {
             "job_id": job.id,
@@ -1316,8 +1357,16 @@ class JobManager:
             report["hint"] = summary["hint"]
         if job.killed_procs:
             report["killed_after_sigterm"] = job.killed_procs
+        if job.escaped:
+            report["escaped"] = job.escaped
         if job.orphans:
             report["orphans"] = job.orphans
+        if job.log_truncated:
+            report["log_truncated"] = {
+                "max_log_bytes": job.max_log_bytes,
+                "note": "output.log se cortó al alcanzar max_log_bytes: log_tail y relevant_lines salen de la memoria "
+                        "(el final del log); en disco queda solo el principio",
+            }
         if ok:
             report["log_tail"] = [ln.format() for ln in recent[-5:]]
         else:
