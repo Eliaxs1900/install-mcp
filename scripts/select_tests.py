@@ -41,6 +41,7 @@ CORE = [
     "src/watcher_mcp/process.py",
     "src/watcher_mcp/config.py",
     "src/watcher_mcp/security.py",
+    "src/watcher_mcp/envsource.py",
     "src/watcher_mcp/server.py",
     "src/watcher_mcp/notify.py",
     "src/watcher_mcp/__init__.py",
@@ -78,7 +79,7 @@ MAP: dict[str, list[str]] = {
     ],
     "src/watcher_mcp/backends/git.py": ["tests/test_web_git_run.py", "tests/test_backends.py", "tests/test_revision.py"],
     "src/watcher_mcp/backends/system.py": [
-        "tests/test_web_git_run.py", "tests/test_backends.py", "tests/test_revision.py",
+        "tests/test_web_git_run.py", "tests/test_backends.py", "tests/test_revision.py", "tests/test_run_rules_env.py",
     ],
     "src/watcher_mcp/backends/ecosystems.py": ["tests/test_backends.py", "tests/test_revision.py"],
     "src/watcher_mcp/backends/jvm.py": ["tests/test_backends.py", "tests/test_revision.py"],
