@@ -101,6 +101,7 @@ MAP: dict[str, list[str]] = {
     "tests/test_cli.py": ["tests/test_cli.py", "tests/test_cli_e2e.py"],
     "tests/test_report_12_14.py": ["tests/test_report_12_14.py"],
     "tests/test_maven_props.py": ["tests/test_maven_props.py"],
+    "tests/test_silencio.py": ["tests/test_silencio.py"],  # autocontenido (backend de script propio)
     "tests/test_core_audit.py": ["tests/test_core_audit.py", "tests/test_core_audit2.py"],  # el 2 importa helpers
     "tests/test_core_audit2.py": ["tests/test_core_audit2.py"],
     "scripts/ci_local.py": ["tests/test_ci_local.py"],

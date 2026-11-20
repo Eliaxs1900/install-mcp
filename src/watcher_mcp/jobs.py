@@ -46,7 +46,13 @@ from typing import IO, Any
 from .backends.base import Backend, CommandStep, FuncStep, Plan, ProbeResult, ResultContext, StepContext
 from .config import Config
 from .envsource import EnvSource, check_env_names
-from .logsummary import RELEVANT, select_relevant  # noqa: F401 - RELEVANT se reexporta
+from .logsummary import (  # noqa: F401 - RELEVANT se reexporta
+    RELEVANT,
+    before_silence,
+    probable_cause,
+    select_relevant,
+    wait_hint,
+)
 from .process import build_env, run_capture, run_command
 from .security import Redactor
 
@@ -70,6 +76,7 @@ class JobState(StrEnum):
 
 TERMINAL = frozenset({JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED, JobState.TIMED_OUT})
 ACTIVE = frozenset({JobState.RUNNING, JobState.STALLED})
+SILENCE_SCAN = 30  # líneas recientes a leer para saber qué había antes de un silencio (incluye notas core)
 
 DETECT_TIMEOUT_S = 120.0
 FOREIGN_POLL_S = 0.5  # sondeo del disco al esperar un job de otra sesión
@@ -204,6 +211,7 @@ class Job:
         self.pid_started_at: float | None = None
         self.last_output_at: float | None = None
         self.stalls = 0
+        self.last_stall_seq: int | None = None  # seq de la nota «atasco» del último atasco
         self.timed_out_reason: str | None = None
         # Procesos del grupo que ignoraron SIGTERM y se mataron con SIGKILL, y los que ni así murieron.
         self.killed_procs: list[int] = []
@@ -351,7 +359,7 @@ class Job:
         return min(done + frac * 0.99, total), total
 
     def stall_info(self) -> dict[str, Any]:
-        return {
+        info: dict[str, Any] = {
             "pid": self.pid,
             "command": self.current_command,
             "step": self.current_step,
@@ -359,6 +367,10 @@ class Job:
             "stall_timeout_s": self.step_stall_s,
             "log_tail": [ln.format() for ln in self.tail(15)],
         }
+        # Qué espera el proceso (depurador, contraseña, sí/no…), a partir de lo último que imprimió.
+        if hint := wait_hint(before_silence(self.tail(SILENCE_SCAN))):
+            info["hint"] = self.redact(hint)
+        return info
 
     def status(self, tail: int = 0) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -1031,12 +1043,14 @@ class JobManager:
                 cmd = " ".join(job.current_command or []) or job.current_step
                 job.add_line("core", f"atasco: sin salida desde hace {silent:.0f}s (pid {job.pid}, paso "
                              f"{job.current_step!r}, comando: {cmd})", activity=False)
+                job.last_stall_seq = job.last_seq
                 job.persist()
-                await self._emit(
-                    JobEvent("stalled", job, "warning",
-                             f"[{job.id}] ATASCADO: sin salida desde hace {silent:.0f}s en el paso "
-                             f"{job.current_step!r} (pid {job.pid})", job.stall_info())
-                )
+                info = job.stall_info()
+                msg = (f"[{job.id}] ATASCADO: sin salida desde hace {silent:.0f}s en el paso "
+                       f"{job.current_step!r} (pid {job.pid})")
+                if info.get("hint"):
+                    msg += f" – {info['hint']}"
+                await self._emit(JobEvent("stalled", job, "warning", msg, info))
             elif job.state == JobState.STALLED and stall and silent < stall:
                 job.state = JobState.RUNNING
                 job.add_line("core", "la salida se ha reanudado", activity=False)
@@ -1319,6 +1333,8 @@ class JobManager:
             headline = f"[{job.id}] TIEMPO AGOTADO tras {dur:.1f}s – {job.error}"
         else:
             headline = f"[{job.id}] FALLÓ (código {job.exit_code}) tras {dur:.1f}s – {job.error}"
+            if cause := probable_cause(wide, job.error or ""):
+                headline += f" · causa probable: {cause}"
         if summary.get("headline"):
             headline += f" · {summary['headline']}"
         if job.killed_procs:
@@ -1330,6 +1346,9 @@ class JobManager:
         if job.log_truncated:
             headline += " · log truncado en disco (max_log_bytes)"
         recent = wide[-400:]
+        # Silencio: atasco, tiempo agotado o cancelación. La clave suele ser lo último que se imprimió.
+        silent_job = job.stalls > 0 or job.state in (JobState.TIMED_OUT, JobState.CANCELLED)
+        before = before_silence(wide, job.last_stall_seq) if silent_job else []
         report: dict[str, Any] = {
             "job_id": job.id,
             "uri": job.uri,
@@ -1353,8 +1372,11 @@ class JobManager:
             report["info"] = _result_info(backend, spec, ResultContext(started_at=job.started_at, ok=ok,
                                                                         state=str(job.state)))
         report.update(summary.get("report") or {})
-        if summary.get("hint"):
-            report["hint"] = summary["hint"]
+        hints = [h for h in (summary.get("hint"), None if ok else wait_hint(before)) if h]
+        if hints:
+            report["hint"] = " · ".join(hints)
+        if before:
+            report["before_silence"] = [ln.format() for ln in before]
         if job.killed_procs:
             report["killed_after_sigterm"] = job.killed_procs
         if job.escaped:
@@ -1370,6 +1392,6 @@ class JobManager:
         if ok:
             report["log_tail"] = [ln.format() for ln in recent[-5:]]
         else:
-            report["relevant_lines"] = [ln.format() for ln in select_relevant(wide)]
+            report["relevant_lines"] = [ln.format() for ln in select_relevant(wide)] or [ln.format() for ln in before]
             report["log_tail"] = [ln.format() for ln in recent[-25:]]
         return job.redact.redact_obj(report)
