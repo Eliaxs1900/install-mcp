@@ -85,7 +85,11 @@ Un paquete que no existe: el informe trae el código de salida y las líneas de 
 relevantes, sin tener que leer el log entero. Las `relevant_lines` descartan las trazas
 (`at …`) y el texto de ayuda de Maven/Gradle, y mezclan las primeras líneas relevantes
 (la causa) con las últimas. En `maven`/`gradle`, `info.built` lista solo los jars que generó
-ese job (y solo si acabó bien); los anteriores salen en `info.stale`.
+ese job (y solo si acabó bien); los anteriores salen en `info.stale`. Si el job se cuelga en
+silencio (atasco, tiempo agotado o cancelación), el informe añade `before_silence` (las últimas
+líneas antes de callarse) y, si reconoce que espera algo (un depurador JDWP, una contraseña, un
+«yes/no»…), una pista en `hint` que ya viaja en el aviso `stalled`; y el titular de un fallo
+suma la «causa probable» de stderr.
 
 ![fail](docs/demos/fail.gif)
 

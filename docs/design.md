@@ -192,6 +192,30 @@ líneas del log (las mismas que lee `summarize`):
    ser la causa) y las **10 últimas** (el resumen final), en orden cronológico. Así una traza
    larga después del error ya no desplaza la causa.
 
+#### Jobs que se callan: `before_silence`, pistas y causa probable
+
+Los jobs que se cuelgan en silencio no imprimen ningún error, así que `relevant_lines` salía
+vacío y el informe solo decía «superó el tiempo». Para eso (`logsummary.py`, tres piezas
+deterministas; sin red ni IA):
+
+- **`before_silence`**: las últimas 5 líneas de stdout/stderr anteriores al silencio. Aparece
+  en un job `timed_out`, `cancelled` o que tuvo algún atasco (`stalls > 0`). El silencio es el
+  **último** atasco (la nota `atasco:` del log; `Job.last_stall_seq`) o, sin atasco, el final del
+  job. Las notas `core` no cuentan. Si `relevant_lines` queda vacío (y el job no acabó bien), se
+  rellena con estas mismas líneas.
+- **Pistas de «esperando entrada»** (`WAIT_PATTERNS`, tabla patrón → pista): reconoce que el
+  proceso espera algo y lo escribe en `hint`, también en el aviso `stalled` (campo `hint` del
+  evento y mensaje `… (pid N) – <pista>`), para saberlo en cuanto se atasca. Cubre el depurador
+  JDWP (`Listening for transport dt_socket at address: N`, p. ej. `maven.surefire.debug` o
+  `-agentlib:jdwp=…suspend=y`), `Password:` / `[sudo] password for`, la frase de paso de ssh, `Are you sure you want to continue connecting (yes/no`,
+  `Press any key` y `(y/n)` / `[Y/n]`. Solo se miran las **últimas 5 líneas antes del silencio**
+  (nunca el log entero) y las preguntas y contraseñas deben acabar la línea, así que un log
+  normal que cita esas palabras no da pistas. En el informe solo se añade si el job no acabó
+  bien; si el backend ya traía un `hint`, se concatenan con ` · `.
+- **Causa probable en el titular**: si el job **falla**, tras el `error` del paso el titular
+  añade `· causa probable: <primera línea relevante de stderr>` (sin ruido, sin la cabecera
+  `Traceback…`, recortada a 200 caracteres), salvo que esa línea ya figure en el `error`.
+
 Resumen del backend (`summarize`): en Maven, si `error_detail` (`Failed to execute goal … :`)
 acaba en `:`, se le añade la siguiente línea `[ERROR]` que no sea ruido (la causa). En
 Maven y Gradle, si el job falla y no llegó a ejecutarse ningún test (`run == 0`), el titular

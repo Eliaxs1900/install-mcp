@@ -9,6 +9,14 @@ Python, Node…) y por último texto de ayuda. Quedarse con las *últimas* líne
 2. se da prioridad a las **primeras** líneas relevantes (las de stderr primero), que suelen
    ser la causa;
 3. se completa con las **últimas**, que suelen ser el resumen final. Todo en orden cronológico.
+
+Además, cuando el job se quedó en silencio (atasco, tiempo agotado o cancelación):
+
+* ``before_silence``: las últimas líneas de salida anteriores al silencio (la clave suele ser la
+  última cosa que imprimió el proceso antes de callarse);
+* ``wait_hint``: reconoce en esas líneas que el proceso **espera algo** (un depurador, una
+  contraseña, un «yes/no»…) y lo convierte en una pista legible;
+* ``probable_cause``: la primera línea relevante de stderr, para el titular de un fallo.
 """
 
 from __future__ import annotations
@@ -36,6 +44,31 @@ NOISE = re.compile(
 
 HEAD = 10
 TAIL = 10
+# Cuántas líneas anteriores al silencio se guardan (``before_silence``) y se examinan (``wait_hint``).
+SILENCE_LINES = 5
+# Tope de caracteres de una línea en el titular («causa probable») y en la pista.
+CAUSE_MAX = 200
+
+# «El proceso espera algo»: (patrón, plantilla de la pista). Solo se aplican a las últimas líneas
+# anteriores a un silencio, nunca a un log completo. Las preguntas de sí/no y las contraseñas deben
+# estar al **final** de la línea (el aviso de un prompt es lo último que se imprime antes de callar).
+_PROMPT_END = r"[\s:?]*$"
+WAIT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"Listening for transport dt_socket at address:\s*(\d+)"),
+     "la JVM espera a que se conecte un depurador en el puerto {0} "
+     "(p. ej. `maven.surefire.debug` o `-agentlib:jdwp=…suspend=y`)"),
+    (re.compile(r"(?i)(?:\[sudo\] password for\b|\bpassword(?: for \S+)?:" + _PROMPT_END + ")"),
+     "el proceso pide una contraseña por la entrada estándar y nadie puede escribirla"),
+    (re.compile(r"(?i)\benter passphrase\b.*:" + _PROMPT_END),
+     "el proceso pide una frase de paso (passphrase) y nadie puede escribirla"),
+    (re.compile(r"Are you sure you want to continue connecting \(yes/no"),
+     "ssh espera que se confirme la huella del servidor (yes/no); usa `-o StrictHostKeyChecking=accept-new` "
+     "o añade el host a known_hosts"),
+    (re.compile(r"(?i)\bpress (?:any key|enter)\b"),
+     "el proceso espera que se pulse una tecla"),
+    (re.compile(r"(?i)(?:\(y/n\)|\[y/n\]|\(yes/no\)|\[yes/no\])" + _PROMPT_END),
+     "el proceso espera una respuesta de sí/no (y/n); lanza la orden en modo no interactivo (p. ej. `-y`)"),
+]
 
 
 class _Line(Protocol):
@@ -77,4 +110,41 @@ def next_useful(lines: Sequence[str], start: int, prefix: str = "[ERROR]") -> st
         s = line.strip()
         if s.startswith(prefix) and not is_noise(s):
             return s[len(prefix):].strip()
+    return None
+
+
+def before_silence(lines: Sequence[_Line], stall_seq: int | None = None, n: int = SILENCE_LINES) -> list[_Line]:
+    """Las últimas ``n`` líneas de salida (stdout/stderr) anteriores al silencio.
+
+    ``stall_seq`` es el ``seq`` de la nota «atasco» del último atasco; sin él (cancelado o tiempo
+    agotado sin atasco previo) se toma el final del log. Las líneas ``core`` nunca cuentan."""
+    out = [ln for ln in lines if ln.stream != "core" and (stall_seq is None or ln.seq < stall_seq)]
+    return out[-n:] if n > 0 else []
+
+
+def wait_hint(lines: Sequence[_Line | str], n: int = SILENCE_LINES) -> str | None:
+    """Pista legible si las últimas ``n`` líneas antes del silencio indican que el proceso espera algo.
+
+    Gana la coincidencia más reciente. Sin coincidencia, ``None``."""
+    texts = [ln if isinstance(ln, str) else ln.text for ln in lines][-n:]
+    for text in reversed(texts):
+        for pattern, template in WAIT_PATTERNS:
+            if m := pattern.search(text):
+                return template.format(*m.groups())
+    return None
+
+
+def probable_cause(lines: Iterable[_Line], error: str = "") -> str | None:
+    """Primera línea relevante de stderr (sin ruido), recortada, o ``None`` si no hay o ya está en ``error``.
+
+    Se salta la cabecera ``Traceback (most recent call last):``, que no dice nada por sí sola."""
+    for ln in lines:
+        if ln.stream != "stderr" or not RELEVANT.search(ln.text) or is_noise(ln.text):
+            continue
+        text = ln.text.strip()
+        if not text or text.startswith("Traceback (most recent call last)"):
+            continue
+        if text in error:
+            return None
+        return text if len(text) <= CAUSE_MAX else text[: CAUSE_MAX - 1] + "…"
     return None
