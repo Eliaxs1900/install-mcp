@@ -587,7 +587,7 @@ docker build --target test -t watcher-mcp:test .
 docker run --rm watcher-mcp:test
 ```
 
-Los tests sin red (más de 200) cubren:
+Los tests sin red (unos 480) cubren:
 - núcleo: jobs en paralelo, logs en vivo, cancelación, `stalled`, `timed_out`, `wait`
   acotado, pipe frente a pty, notificaciones de punta a punta por MCP y redacción de
   secretos;
@@ -643,7 +643,8 @@ src/watcher_mcp/
 docs/design.md           diseño
 docs/demos/              GIF, PNG y .cast de las demos
 examples/                demos, comparativa, slowpkg, cliente mínimo y configuración
-scripts/                 grabación (pty -> .cast) y render (.cast -> GIF/PNG)
+scripts/                 select_tests.py (pruebas selectivas), verificar_local.py + ci_local.py (tests en
+                         local para mantenedores), grabación y render de las demos (.cast -> GIF/PNG)
 tests/                   pytest
 ```
 
